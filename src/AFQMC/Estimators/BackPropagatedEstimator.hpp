@@ -74,13 +74,14 @@ class BackPropagatedEstimator: public EstimatorBase
                                       max_nback_prop(10),
                                       nStabilize(10), block_size(1), path_restoration(false),
                                       importanceSampling(impsamp_),extra_path_restoration(false),
-                                      first(true)
+                                      first(true),modified_bp(false)
   {
     int nave(1);
     if(cur != NULL) {
       ParameterSet m_param;
       std::string restore_paths;
       std::string restore_paths2;
+      std::string bp_alg(""); 
       m_param.add(nStabilize, "ortho", "int");
       m_param.add(max_nback_prop, "nsteps", "int");
       m_param.add(nave, "naverages", "int");
@@ -88,6 +89,7 @@ class BackPropagatedEstimator: public EstimatorBase
       m_param.add(restore_paths2, "extra_path_restoration", "std::string");
       m_param.add(block_size, "block_size", "int");
       m_param.add(nblocks_skip, "nskip", "int");
+      m_param.add(bp_alg, "modified_bp", "std::string");
       m_param.put(cur);
       if(restore_paths == "true" || restore_paths == "yes") 
         path_restoration = true;
@@ -95,6 +97,7 @@ class BackPropagatedEstimator: public EstimatorBase
         path_restoration = true;
         extra_path_restoration = true;
       }
+      modified_bp = (bp_alg=="yes" || bp_alg == "true" );
     }
 
     if(nave <= 0)
@@ -110,6 +113,8 @@ class BackPropagatedEstimator: public EstimatorBase
 
     if(max_nback_prop <= 0)
       APP_ABORT("max_nback_prop <= 0 is not allowed.\n");
+    if(modified_bp)
+      app_log()<<" Using modified back propagation algorithm. \n";
 
     int ncv(prop0.global_number_of_cholesky_vectors());
     nrefs=wfn0.number_of_references_for_back_propagation();
@@ -182,15 +187,29 @@ class BackPropagatedEstimator: public EstimatorBase
     std::tie(n0,n1) = FairDivideBoundary(TG.getLocalTGRank(),int(Refs.size(2)),TG.getNCoresPerTG());
     boost::multi::array_ref<ComplexType,3> Refs_(to_address(Refs.origin()),Refs.extensions());
 
-    // 2. setup back propagated references
-    wfn0.getReferencesForBackPropagation(Refs_[0]);
-    for(int iw=1; iw<wset.size(); ++iw)
-      for(int ref=0; ref<nrefs; ++ref)
-       copy_n(Refs_[0][ref].origin()+n0,n1-n0,Refs_[iw][ref].origin()+n0);
-    TG.TG_local().barrier();
+    if(not modified_bp) { 
 
-    //3. propagate backwards the references
-    prop0.BackPropagate(bp_step,nStabilize,wset,Refs_,detR);
+      // 2. setup back propagated references
+      wfn0.getReferencesForBackPropagation(Refs_[0]);
+      for(int iw=1; iw<wset.size(); ++iw)
+        for(int ref=0; ref<nrefs; ++ref)
+          copy_n(Refs_[0][ref].origin()+n0,n1-n0,Refs_[iw][ref].origin()+n0);
+      TG.TG_local().barrier();
+
+      //3. propagate backwards the references
+      prop0.BackPropagate(bp_step,nStabilize,wset,Refs_,detR);
+
+    } else {
+
+      int r0,rN;
+      std::tie(r0,rN) = FairDivideBoundary(TG.getLocalTGRank(),nrow*ncol,TG.getNCoresPerTG());
+      if(nrefs>1) APP_ABORT("Error: nrefs>1 with modified_bp. \n");   
+      std::fill_n(detR.origin(),detR.num_elements(),ComplexType(1.0,0.0));
+      for(int i=0; i<wset.size(); i++) 
+        copy_n((*wset[i].SlaterMatrix(Alpha)).origin()+r0,rN-r0,Refs_[i][0].origin()+r0);
+      TG.TG_local().barrier();
+
+    }
 
     //4. calculate properties 
     // adjust weights here is path restoration
@@ -311,6 +330,8 @@ class BackPropagatedEstimator: public EstimatorBase
   int first;
 
   bool write_metadata = true;
+
+  bool modified_bp = false;
 
 };
 }
