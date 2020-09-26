@@ -133,6 +133,7 @@ TEST_CASE("batchedDot", "[Numerics][misc_kernels]")
   Tensor1D<std::complex<double>> ref(iextensions<1U>{dim}, ref_val, alloc);
   verify_approx(ref, y);
 }
+
 #endif
 
 } // namespace qmcplusplus

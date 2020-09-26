@@ -23,12 +23,16 @@
 
 #include <vector>
 
+#include "Utilities/Timer.h"
 
 #include "AFQMC/config.h"
 #include "AFQMC/config.0.h"
+#include "AFQMC/Numerics/ma_operations.hpp"
 #include "AFQMC/Numerics/ma_blas.hpp"
-#include "AFQMC/Numerics/batched_operations.hpp"
+#include "AFQMC/Numerics/ma_small_mat_ops.hpp"
 #include "AFQMC/Matrix/tests/matrix_helpers.h"
+#include "AFQMC/Numerics/device_kernels.hpp"
+#include "AFQMC/Utilities/test_utils.hpp"
 
 #include "multi/array.hpp"
 #include "multi/array_ref.hpp"
@@ -291,6 +295,119 @@ TEST_CASE("get_diagonal_strided", "[Numerics][ma_blas_extensions]")
   Tensor2D<ComplexType> ref = {{ComplexType(1.0), ComplexType(1.0, -3.0), ComplexType(0, -1.0)},
                                {ComplexType(1.0), ComplexType(1.0, -3.0), ComplexType(0, -1.0)}};
   verify_approx(A, ref);
+}
+
+TEST_CASE("fill_irregular", "[Numerics][ma_blas_extensions]")
+{
+  Alloc<ComplexType> alloc{};
+  Alloc<int> ialloc{};
+  int ndet = 4;
+  int nex = 2;
+  int nmo = 10;
+  Tensor3D<ComplexType> M({ndet, nex, nex}, ComplexType(0.0), alloc);
+  Tensor2D<ComplexType> T({nmo, nmo}, ComplexType(0.0), alloc);
+  Tensor1D<int> excit = {7, 9, 3, 4, 7, 9, 3, 4, 7, 9, 3, 4, 7, 9, 3, 4, 7, 9, 3, 4, 7, 9, 3, 4, 7, 9, 3, 4, 7, 9, 3, 4};
+  std::vector<int> excit_ = {7, 9, 3, 4, 7, 9, 3, 4};
+  boost::multi::array<ComplexType, 3>  M_({ndet, nex, nex}, ComplexType(0,0));
+  boost::multi::array<ComplexType, 2>  T_({nmo, nmo}, ComplexType(0,0));
+  for (int i = 0; i < nmo; i++) {
+    for (int j = 0; j < nmo; j++) {
+      T_[i][j] = ComplexType(j);
+    }
+  }
+  using std::copy_n;
+  copy_n(T_.data(), T_.num_elements(), T.origin());
+  // CPU version
+  for (int id = 0; id < ndet; id++) {
+    for (int p = 0; p < nex; p++) {
+      for (int q = 0; q < nex; q++) {
+        M_[id][p][q] = T_[excit_[p+nex]][excit_[q]];
+        //if (id == 0)
+          //std::cout << excit_[p+nex] << " " << excit_[q] << " " << T_[excit_[p+nex]][excit_[q]] << std::endl ;
+        REQUIRE(std::real(M_[id][p][q]) == Approx(excit_[q]));
+      }
+    }
+  }
+  using kernels::irregular_fill;
+  irregular_fill(ndet, nex, nmo, to_address(excit.origin()), to_address(T.origin()), to_address(M.origin()));
+  boost::multi::array<ComplexType, 3> tmp({ndet,nex,nex}, 0.0);
+  copy_n(M.data(), M.num_elements(), tmp.origin());
+  for (int i = 0; i < tmp.num_elements(); i++) {
+    REQUIRE(std::real(*(tmp.data()+i)) == Approx(std::real(*(M_.data()+i))));
+  }
+}
+
+TEST_CASE("calculate_overlaps", "[Numerics][ma_blas_extensions]")
+{
+  auto world = boost::mpi3::environment::get_world_instance();
+  auto node  = world.split_shared(world.rank());
+  arch::INIT(node);
+  Alloc<ComplexType> alloc{};
+  Alloc<int> ialloc{};
+  int ndet = 1000;
+  int nex = 2;
+  int nmo = 100;
+  Tensor3D<ComplexType> M({ndet, nex, nex}, ComplexType(0.0), alloc);
+  Tensor2D<ComplexType> T({nmo, nmo}, ComplexType(0.0), alloc);
+  boost::multi::array<ComplexType, 3> M_({ndet, nex, nex}, ComplexType(0.0));
+  boost::multi::array<ComplexType, 2> T_({nmo, nmo}, ComplexType(0.0));
+  Tensor1D<int> excit(iextensions<1u>{ndet*2*nex}, 0, alloc);
+  Tensor1D<int> IWORK(iextensions<1u>{ndet*(nex+1)}, alloc);
+  std::vector<int> tmpi(ndet*2*nex);
+  {
+    std::vector<ComplexType> tmp(nmo*nmo);
+    fillRandomMatrix(tmp);
+    copy_n(tmp.data(), tmp.size(), T.origin());
+    copy_n(tmp.data(), tmp.size(), T_.origin());
+    fillRandomMatrix(tmpi, nmo);
+    copy_n(tmpi.data(), tmpi.size(), excit.origin());
+  }
+  Timer timer;
+  for (int i = 0; i < ndet; i++)
+    for (int j = 0; j < nex; j++)
+      for (int k = 0; k < nex; k++)
+      {
+        M_[i][j][k] = T_[tmpi[i*2*nex+j+nex]][tmpi[i*2*nex+k]];
+      }
+  std::cout << " Tcpu fill: " << timer.elapsed() << std::endl;
+  using kernels::irregular_fill;
+  timer.restart();
+  irregular_fill(ndet, nex, nmo, to_address(excit.origin()), to_address(T.origin()), to_address(M.origin()));
+  std::cout << " Tgpu fill: " << timer.elapsed() << std::endl;
+  {
+    boost::multi::array<ComplexType, 3> tmp({ndet,nex,nex}, 0.0);
+    copy_n(M.data(), M.num_elements(), tmp.origin());
+    for (int i = 0; i < tmp.num_elements(); i++) {
+      REQUIRE(std::real(*(tmp.data()+i)) == Approx(std::real(*(M_.data()+i))));
+    }
+  }
+  std::vector<pointer<ComplexType>> Marray;
+  for (int i = 0; i < ndet; i++)
+  {
+    Marray.emplace_back(M[i].origin());
+  }
+  Tensor1D<ComplexType> ovlp(iextensions<1u>{ndet}, 0.0, alloc);
+  using ma::getrfBatched;
+  timer.restart();
+  getrfBatched(nex, Marray.data(), nex, ma::pointer_dispatch(IWORK.origin()),
+               ma::pointer_dispatch(IWORK.origin()) + ndet*nex, ndet);
+  using ma::batched_determinant_from_getrf;
+  batched_determinant_from_getrf(nex, Marray.data(), nex, IWORK.origin(), nex, ComplexType(0.0), to_address(ovlp.origin()), ndet);
+  std::cout << " Tgpu det: " << timer.elapsed() << std::endl;
+  std::vector<ComplexType> ovlp_host(ndet, 0.0);
+  copy_n(ovlp.origin(), ovlp.num_elements(), ovlp_host.data());
+  using ma::determinant;
+  boost::multi::array<int, 1> pivot(iextensions<1u>{nex});
+  boost::multi::array<ComplexType, 2> work({nex,nex});
+  ComplexType lovlp = 0.0;
+  timer.restart();
+  for (int i = 0; i < ndet; i++) {
+    //ComplexType det = determinant(M_[i], pivot, work, lovlp);
+    auto det = ma::D2x2(M_[i][0][0], M_[i][0][1], M_[i][1][0], M_[i][1][1]);
+    //REQUIRE(std::real(ovlp_host[i]) == Approx(std::real(det)));
+  }
+  std::cout << " Tcpu det: " << timer.elapsed() << std::endl;
+
 }
 
 } // namespace qmcplusplus
