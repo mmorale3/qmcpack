@@ -50,6 +50,7 @@
 #include "AFQMC/Numerics/detail/CUDA/Kernels/Auwn_Bun_Cuw.cuh"
 #include "AFQMC/Numerics/detail/CUDA/Kernels/inplace_product.cuh"
 #include "AFQMC/Numerics/detail/CUDA/Kernels/get_diagonal.cuh"
+#include "AFQMC/Numerics/detail/CUDA/Kernels/irregular_fill.cuh"
 
 #elif defined(ENABLE_HIP)
 
