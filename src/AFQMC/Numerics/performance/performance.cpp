@@ -13,7 +13,6 @@
 #include "Configuration.h"
 
 #include <vector>
-#include <random>
 
 #include "Utilities/Timer.h"
 
@@ -25,6 +24,7 @@
 #include "AFQMC/Matrix/tests/matrix_helpers.h"
 #include "AFQMC/Memory/buffer_allocators.h"
 #include "AFQMC/Memory/arch.hpp"
+#include "AFQMC/Utilities/test_utils.hpp"
 
 #include "multi/array.hpp"
 #include "multi/array_ref.hpp"
@@ -63,34 +63,6 @@ template<typename T>
 using Tensor2D_ref = boost::multi::array_ref<T, 2, pointer<T>>;
 template<typename T>
 using Tensor1D_ref = boost::multi::array_ref<T, 1, pointer<T>>;
-
-template<typename T>
-void fillRandomMatrix(std::vector<T>& vec)
-{
-  std::mt19937 generator(0);
-  std::normal_distribution<T> distribution(0.0, 1.0);
-  // avoid uninitialized warning
-  T tmp = distribution(generator);
-  for (int i = 0; i < vec.size(); i++)
-  {
-    T val  = distribution(generator);
-    vec[i] = val;
-  }
-}
-
-template<typename T>
-void fillRandomMatrix(std::vector<std::complex<T>>& vec)
-{
-  std::mt19937 generator(0);
-  std::normal_distribution<T> distribution(0.0, 1.0);
-  T tmp = distribution(generator);
-  for (int i = 0; i < vec.size(); i++)
-  {
-    T re   = distribution(generator);
-    T im   = distribution(generator);
-    vec[i] = std::complex<T>(re, im);
-  }
-}
 
 template<class Allocator, class Buff>
 void timeBatchedQR(std::ostream& out, Allocator& alloc, Buff& buffer, int nbatch, int m, int n)

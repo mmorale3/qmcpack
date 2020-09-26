@@ -15,7 +15,10 @@
 #define QMCPLUSPLUS_AFQMC_TEST_UTILS_HPP
 
 #include <complex>
+#include <random>
+
 #include "io/hdf_archive.h"
+#include "AFQMC/Utilities/test_utils.hpp"
 
 namespace qmcplusplus
 {
@@ -137,6 +140,49 @@ inline std::string create_test_hdf(std::string& wfn_file, std::string& hamil_fil
 
   return wfn_base + "_" + ham_base + ".h5";
 }
+
+// generate matrix of random integers between [0, range)
+void fillRandomMatrix(std::vector<int>& vec, int range)
+{
+  std::mt19937 generator(0);
+  std::uniform_int_distribution<int> distribution(0, range-1);
+  // avoid uninitialized warning
+  int tmp = distribution(generator);
+  for (int i = 0; i < vec.size(); i++)
+  {
+    int val  = distribution(generator);
+    vec[i] = val;
+  }
+}
+
+template<typename T>
+void fillRandomMatrix(std::vector<T>& vec)
+{
+  std::mt19937 generator(0);
+  std::normal_distribution<T> distribution(0.0, 1.0);
+  // avoid uninitialized warning
+  T tmp = distribution(generator);
+  for (int i = 0; i < vec.size(); i++)
+  {
+    T val  = distribution(generator);
+    vec[i] = val;
+  }
+}
+
+template<typename T>
+void fillRandomMatrix(std::vector<std::complex<T>>& vec)
+{
+  std::mt19937 generator(0);
+  std::normal_distribution<T> distribution(0.0, 1.0);
+  T tmp = distribution(generator);
+  for (int i = 0; i < vec.size(); i++)
+  {
+    T re   = distribution(generator);
+    T im   = distribution(generator);
+    vec[i] = std::complex<T>(re, im);
+  }
+}
+
 
 
 } // namespace afqmc
