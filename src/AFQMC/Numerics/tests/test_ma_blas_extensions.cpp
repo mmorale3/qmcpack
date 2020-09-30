@@ -4,7 +4,7 @@
 //
 // Copyright (c) 2016 Jeongnim Kim and QMCPACK developers.
 //
-// File developed by:
+// File developed by: Fionn D. Malone
 //
 // File created by:
 // Fionn D. Malone, malone14@llnl.gov
@@ -345,7 +345,7 @@ TEST_CASE("calculate_overlaps", "[Numerics][ma_blas_extensions]")
   Alloc<ComplexType> alloc{};
   Alloc<int> ialloc{};
   int ndet = 1000;
-  int nex = 2;
+  int nex = 5;
   int nmo = 100;
   Tensor3D<ComplexType> M({ndet, nex, nex}, ComplexType(0.0), alloc);
   Tensor2D<ComplexType> T({nmo, nmo}, ComplexType(0.0), alloc);
@@ -403,7 +403,11 @@ TEST_CASE("calculate_overlaps", "[Numerics][ma_blas_extensions]")
   timer.restart();
   for (int i = 0; i < ndet; i++) {
     //ComplexType det = determinant(M_[i], pivot, work, lovlp);
-    auto det = ma::D2x2(M_[i][0][0], M_[i][0][1], M_[i][1][0], M_[i][1][1]);
+    //auto det = ma::D4x4(M_[i][0][0], M_[i][0][1], M_[i][1][0], M_[i][1][1]);
+    auto det = ma::D4x4(M_[i][0][0], M_[i][0][1], M_[i][0][2], M_[i][0][3],
+                        M_[i][1][0], M_[i][1][1], M_[i][1][2], M_[i][1][3],
+                        M_[i][2][0], M_[i][2][1], M_[i][2][2], M_[i][2][3],
+                        M_[i][3][0], M_[i][3][1], M_[i][3][2], M_[i][3][3]);
     //REQUIRE(std::real(ovlp_host[i]) == Approx(std::real(det)));
   }
   std::cout << " Tcpu det: " << timer.elapsed() << std::endl;
