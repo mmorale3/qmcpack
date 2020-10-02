@@ -63,10 +63,7 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
     wgt.reextent(iextensions<1u>{nwalk});
   if (opSpinEJ.size() != nwalk)
     opSpinEJ.reextent(iextensions<1u>{nwalk});
-  if (localGbuff.size() < 2 * Gsize)
-    localGbuff.reextent(iextensions<1u>{2 * Gsize});
-  if (eloc2.size(0) != nwalk || eloc2.size(1) != 3)
-    eloc2.reextent({nwalk, 3});
+  StaticMatrix eloc2({nwalk, 3}, buffer_allocator->template get_allocator<ComplexType>());
 
   std::fill_n(Ov.origin(), nwalk, zero);
   std::fill_n(E.origin(), 3 * nwalk, zero);
@@ -100,9 +97,8 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
     {
       if (nc % TG.TG_local().size() == TG.TG_local().rank())
       {
-        boost::multi::array_ref<ComplexType, 2> G2D_(localGbuff.origin(),
-                                                     {dm_dims_ref(false, Alpha).first,
-                                                      dm_dims_ref(false, Alpha).second});
+        StaticMatrix G2D_({dm_dims_ref(false, Alpha).first,dm_dims_ref(false, Alpha).second},
+                            buffer_allocator->template get_allocator<ComplexType>());
         Ovmsd[0][0][iw] = SDetOp.MixedDensityMatrixForWoodbury(OrbMats[0], *wset[iw].SlaterMatrix(Alpha), G2D_,
                                                                LogOverlapFactor, refc, QQ0A[iw], true);
         confg.resize(NAEA);
@@ -115,8 +111,8 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
       ++nc;
       if (nc % TG.TG_local().size() == TG.TG_local().rank())
       {
-        boost::multi::array_ref<ComplexType, 2> G2D_(localGbuff.origin(),
-                                                     {dm_dims_ref(false, Beta).first, dm_dims_ref(false, Beta).second});
+        StaticMatrix G2D_({dm_dims_ref(false, Beta).first, dm_dims_ref(false, Beta).second},
+                            buffer_allocator->template get_allocator<ComplexType>());
         Ovmsd[1][0][iw] =
             SDetOp.MixedDensityMatrixForWoodbury(OrbMats.back(),
                                                  *wset[iw].SlaterMatrix(SpinTypes((walker_type == CLOSED) ? 0 : 1)),
@@ -147,7 +143,8 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
       confg.resize((spin == 0) ? NAEA : NAEB);
       auto Gdims     = dm_dims(false, SpinTypes(spin));
       auto Gdims_ref = dm_dims_ref(false, SpinTypes(spin));
-      boost::multi::array_ref<ComplexType, 2> G2D_(localGbuff.origin(), {Gdims_ref.first, Gdims_ref.second});
+      StaticMatrix G2D_({Gdims_ref.first, Gdims_ref.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
       int nr = Gdims.first * Gdims.second, nc = nwalk;
       if (transposed_G_for_E_)
         std::swap(nr, nc);
@@ -191,19 +188,11 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
           // reduce_n since Emsd is in shared memory (doing this instead of copy with mutex)
           TG.TG_local().reduce_n(to_address(eloc2.origin()), 3 * nwalk, to_address(Emsd[spin][nd].origin()),
                                  std::plus<>(), 0);
-          //std::cout<<" E: " <<spin <<" " <<nd <<" " <<Ovmsd[spin][nd][0] <<" "
-          //<<eloc2[0][0] <<" "
-          //<<eloc2[0][1] <<" "
-          //<<eloc2[0][2] <<std::endl;
           TG.local_barrier();
         }
         else
         {
           HamOp.energy(eloc2, G, orb_spin_indx, std::addressof(KEleft), dummyMatPtr, TG.TG_local().root(), true, true);
-          //std::cout<<" E: " <<spin <<" " <<nd <<" " <<Ovmsd[spin][nd][0] <<" "
-          //<<eloc2[0][0] <<" "
-          //<<eloc2[0][1] <<" "
-          //<<eloc2[0][2] <<std::endl;
           // reduce_n since Emsd is in shared memory (doing this instead of copy with mutex)
           TG.TG_local().reduce_n(to_address(eloc2.origin()), 3 * nwalk, to_address(Emsd[spin][nd].origin()),
                                  std::plus<>(), 0);
@@ -303,108 +292,6 @@ template<class WlkSet, class Mat, class TVec>
 void PHMSD::Energy_distributed(const WlkSet& wset, Mat&& E, TVec&& Ov)
 {
   APP_ABORT(" Error: Finish PHMSD::Energy_distributed. \n");
-  /*
-    //1. Calculate G and overlaps
-    //2. Loop over nodes in TG
-    // 2.a isend G to next node. irecv next G from "previous" node 
-    // 2.b add local contribution to current G
-    // 2.c wait for comms to finish
-    //3. all reduce resulting energies    
-
-    assert(ci.size()==1);
-    bool new_shm_space=false; 
-    const int node_number = TG.getLocalGroupNumber();
-    const int nnodes = TG.getNGroupsPerTG();
-    const int Gsize = dm_size(false);
-    const ComplexType zero(0.0);
-    const int nwalk = wset.size();
-    // allocte space in shared memory for:
-    //  i.  2 copies of G (always compact),
-    //  ii. ovlps for local walkers
-    //  iii. energies[3] for all walkers on all nodes of TG (assume all nodes have same # of walkers)
-    int nt = nwalk*(2*Gsize+1);
-    if(not shmbuff_for_E) { 
-      shmbuff_for_E = std::move(std::make_unique<SHM_Buffer>(TG.TG_local(),nt));
-      new_shm_space=true;
-    }
-    // in case the number of walkers changes
-    if(shmbuff_for_E->num_elements() < nt) {
-      shmbuff_for_E = std::move(std::make_unique<SHM_Buffer>(TG.TG_local(),nt));
-      new_shm_space=true;
-    }
-    assert(shmbuff_for_E->num_elements() >= nt);
-    assert(E.dimensionality==2);
-    assert(Ov.dimensionality==1);
-    assert(E.size(0)==wset.size());
-    assert(Ov.size(0)==wset.size());
-    assert(E.size(1)==3);
-
-    int nr=Gsize,nc=nwalk;
-    if(transposed_G_for_E_) std::swap(nr,nc);
-    int displ=0;
-    boost::multi::array_ref<ComplexType,2> Gwork(to_address(shmbuff_for_E->origin()),
-                                                {nr,nc});
-      displ += Gsize*nwalk;
-    boost::multi::array_ref<ComplexType,2> Grecv(to_address(shmbuff_for_E->origin())+displ,
-                                                {nr,nc});
-      displ += Gsize*nwalk;
-    boost::multi::array_ref<ComplexType,1> overlaps(to_address(shmbuff_for_E->origin())+displ,
-                                                   iextensions<1u>{nwalk});
-    if(eloc2.size(0) != nnodes*nwalk || eloc2.size(1) != 3) 
-        eloc2.resize({nnodes*nwalk,3});
-    auto elocal = eloc2[node_number*nwalk];
-    int nak0,nak1;
-    std::tie(nak0,nak1) = FairDivideBoundary(TG.getLocalTGRank(),Gsize*nwalk,TG.getNCoresPerTG());
-
-    if(new_shm_space) {
-      // use mpi3 when ready
-      if(req_Grecv!=MPI_REQUEST_NULL)
-          MPI_Request_free(&req_Grecv);
-      if(req_Gsend!=MPI_REQUEST_NULL)
-          MPI_Request_free(&req_Gsend);
-      MPI_Send_init(Gwork.origin()+nak0,(nak1-nak0)*sizeof(ComplexType),MPI_CHAR,
-                    TG.prev_core(),1234,TG.TG().impl_,&req_Gsend);
-      MPI_Recv_init(Grecv.origin()+nak0,(nak1-nak0)*sizeof(ComplexType),MPI_CHAR,
-                    TG.next_core(),1234,TG.TG().impl_,&req_Grecv);
-    }
-   
-    std::fill_n(eloc2.origin(),3*nnodes*nwalk,ComplexType(0.0)); 
-    TG.local_barrier();
-
-    MPI_Status st;
-
-    // calculate G for local walkers
-    MixedDensityMatrix_for_E(wset,Gwork,overlaps,0);
-
-    for(int k=0; k<nnodes; k++) {
-
-      // wait for G from node behind you, copy to Gwork  
-      if(k>0) {
-        MPI_Wait(&req_Grecv,&st);
-        MPI_Wait(&req_Gsend,&st);     // need to wait for Gsend in order to overwrite Gwork  
-        std::copy_n(Grecv.origin()+nak0,(nak1-nak0),Gwork.origin()+nak0);
-        TG.local_barrier();
-      }
-
-      // post send/recv messages with nodes ahead and behind you
-      if(k < nnodes-1) {
-        MPI_Start(&req_Gsend); 
-        MPI_Start(&req_Grecv); 
-      }
-
-      // calculate your contribution of the local enery to the set of walkers in Gwork
-      int q = (k+node_number)%nnodes;
-      HamOp.energy(eloc2.sliced(q*nwalk,(q+1)*nwalk),
-                   Gwork,0,TG.TG_local().root() && k==0);
-      TG.local_barrier();
-
-    }
-    TG.TG().all_reduce_in_place_n(eloc2.origin(),3*nnodes*nwalk,std::plus<>());
-    TG.local_barrier();    
-    std::copy_n(elocal.origin(),3*nwalk,E.origin());
-    std::copy_n(overlaps.origin(),nwalk,Ov.origin());
-    TG.local_barrier();    
-*/
 }
 
 /*
@@ -434,16 +321,6 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
       std::fill_n(G[i].origin(), G.size(1), ComplexType(0.0));
   TG.local_barrier();
   auto Gsize = size_t(dm_size(not compact));
-  if (compact)
-  {
-    if (localGbuff.size() < 2 * Gsize) // 2 copies needed
-      localGbuff.reextent(iextensions<1u>{2 * Gsize});
-  }
-  else
-  {
-    if (localGbuff.size() < 3 * Gsize) // 3 copies needed
-      localGbuff.reextent(iextensions<1u>{3 * Gsize});
-  }
   if (walker_type != COLLINEAR)
   {
     APP_ABORT(" Error: Finish implementation of PHMSD::MixedDensityMatrix for CLOSED and NONCOLLINEAR. \n");
@@ -463,25 +340,25 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
     }
     auto GAdims0 = dm_dims_ref(false, Alpha);
     auto GBdims0 = dm_dims_ref(false, Beta);
-    size_t cnt   = 0;
     // REDUCE ALL THIS TEMPORARY STORAGE!!!
     // storage for reference Green functions
-    boost::multi::array_ref<ComplexType, 2> GA2D0_(localGbuff.origin(), {GAdims0.first, GAdims0.second});
-    cnt += GA2D0_.num_elements();
-    boost::multi::array_ref<ComplexType, 2> GB2D0_(localGbuff.origin() + cnt, {GBdims0.first, GBdims0.second});
-    cnt += GB2D0_.num_elements();
+    StaticMatrix GA2D0_({GAdims0.first, GAdims0.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
+    StaticMatrix GB2D0_({GBdims0.first, GBdims0.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
     // storage for Gw in case need to transpose result at the end
-    boost::multi::array_ref<ComplexType, 2> GA2D_(localGbuff.origin() + cnt, {GAdims.first, GAdims.second});
-    cnt += GA2D_.num_elements();
-    boost::multi::array_ref<ComplexType, 2> GB2D_(localGbuff.origin() + cnt, {GBdims.first, GBdims.second});
-    cnt += GB2D_.num_elements();
-    boost::multi::array_ref<ComplexType, 1> GA1D_(GA2D_.origin(), iextensions<1u>{GAdims.first * GAdims.second});
+    StaticMatrix GA2D_({GAdims.first, GAdims.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
+    StaticMatrix GB2D_({GBdims.first, GBdims.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
+    boost::multi::array_ref<ComplexType, 1>  GA1D_(GA2D_.origin(), iextensions<1u>{GAdims.first * GAdims.second});
     boost::multi::array_ref<ComplexType, 1> GB1D_(GB2D_.origin(), iextensions<1u>{GBdims.first * GBdims.second});
+
     // storage for full G in case compact=false
-    boost::multi::array_ref<ComplexType, 2> Gfulla(localGbuff.origin() + cnt, {GAdims_full.first, GAdims_full.second});
-    cnt += Gfulla.num_elements();
-    boost::multi::array_ref<ComplexType, 2> Gfullb(localGbuff.origin() + cnt, {GBdims_full.first, GBdims_full.second});
-    cnt += Gfullb.num_elements();
+    StaticMatrix Gfulla({GAdims_full.first, GAdims_full.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
+    StaticMatrix Gfullb({GBdims_full.first, GBdims_full.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
 
     const int ntasks_percore      = nw / TG.getNCoresPerTG();
     const int ntasks_total_serial = ntasks_percore * TG.getNCoresPerTG();
@@ -808,8 +685,6 @@ void PHMSD::DensityMatrix_shared(const WlkSet& wset,
   TG.local_barrier();
   double LogOverlapFactor(wset.getLogOverlapFactor());
   auto Gsize = size_t(dm_size(not compact));
-  if (localGbuff.size() < Gsize)
-    localGbuff.reextent(iextensions<1u>{Gsize});
 
   if (walker_type != COLLINEAR)
   {
@@ -819,7 +694,8 @@ void PHMSD::DensityMatrix_shared(const WlkSet& wset,
       assert(RefA.size(1) == dm_dims(false, Alpha).first && RefA.size(0) == dm_dims(false, Alpha).second);
 
     auto Gdims = dm_dims(not compact, Alpha);
-    CMatrix_ref G2D_(localGbuff.origin(), {Gdims.first, Gdims.second});
+    StaticMatrix G2D_({Gdims.first, Gdims.second},
+                        buffer_allocator->template get_allocator<ComplexType>());
     CVector_ref G1D_(G2D_.origin(), iextensions<1u>{G2D_.num_elements()});
 
     for (int iw = 0; iw < nw; ++iw)
@@ -846,13 +722,14 @@ void PHMSD::DensityMatrix_shared(const WlkSet& wset,
     else
       assert(RefB.size(1) == dm_dims(false, Beta).first && RefB.size(0) == dm_dims(false, Beta).second);
 
-    if (ovlp2.size(0) < 2 * nw)
-      ovlp2.reextent(iextensions<1u>{2 * nw});
+    StaticVector ovlp2(iextensions<1u>{2 * nw}, buffer_allocator->template get_allocator<ComplexType>());
     fill_n(ovlp2.origin(), 2 * nw, ComplexType(0.0));
     auto GAdims = dm_dims(not compact, Alpha);
     auto GBdims = dm_dims(not compact, Beta);
-    CMatrix_ref GA2D_(localGbuff.origin(), {GAdims.first, GAdims.second});
-    CMatrix_ref GB2D_(GA2D_.origin() + GA2D_.num_elements(), {GBdims.first, GBdims.second});
+    StaticMatrix GA2D_({GAdims.first, GAdims.second},
+                        buffer_allocator->template get_allocator<ComplexType>());
+    StaticMatrix GB2D_({GBdims.first, GBdims.second},
+                        buffer_allocator->template get_allocator<ComplexType>());
     CVector_ref GA1D_(GA2D_.origin(), iextensions<1u>{GA2D_.num_elements()});
     CVector_ref GB1D_(GB2D_.origin(), iextensions<1u>{GB2D_.num_elements()});
 
@@ -1258,8 +1135,6 @@ void PHMSD::vMF(Vec&& v)
   assert(v.num_elements() == local_number_of_cholesky_vectors());
   std::fill_n(v.origin(), v.num_elements(), ComplexType(0));
   auto Gsize = size_t(dm_size(false));
-  if (localGbuff.size() < Gsize)
-    localGbuff.reextent(iextensions<1u>{Gsize});
 
   //shmCMatrix ovlps({2,maxn_unique_confg},shared_allocator<ComplexType>{TG.Node()});
   //boost::multi::array<ComplexType,2> ovlps({2,maxn_unique_confg});
@@ -1313,7 +1188,8 @@ void PHMSD::vMF(Vec&& v)
     confg.resize((spin == 0) ? NAEA : NAEB);
     auto Gdims     = dm_dims(false, SpinTypes(spin));
     auto Gdims_ref = dm_dims_ref(false, SpinTypes(spin));
-    boost::multi::array_ref<ComplexType, 2> G2D_(localGbuff.origin(), {Gdims_ref.first, Gdims_ref.second});
+    StaticMatrix G2D_({Gdims_ref.first, Gdims_ref.second},
+                        buffer_allocator->template get_allocator<ComplexType>());
     boost::multi::array_ref<ComplexType, 1> G1D_(G2D_.origin(), iextensions<1u>{G2D_.num_elements()});
     boost::multi::array<ComplexType, 2> SM_({Gdims_ref.second, Gdims_ref.first});
     // store mean field G

@@ -28,6 +28,7 @@
 #include "multi/array.hpp"
 #include "multi/array_ref.hpp"
 #include "AFQMC/Utilities/taskgroup.h"
+#include "AFQMC/Memory/buffer_allocators.h"
 #include "AFQMC/Matrix/array_of_sequences.hpp"
 
 #include "AFQMC/HamiltonianOperations/HamiltonianOperations.hpp"
@@ -41,6 +42,10 @@ namespace qmcplusplus
 {
 namespace afqmc
 {
+
+extern std::shared_ptr<device_allocator_generator_type> device_buffer_generator;
+extern std::shared_ptr<localTG_allocator_generator_type> localTG_buffer_generator;
+
 /*
  * Class that implements a multi-Slater determinant trial wave-function.
  * Single determinant wfns are also allowed. 
@@ -70,6 +75,9 @@ class PHMSD : public AFQMCInfo
   using pointer_shared       = typename Allocator_shared::pointer;
   using const_pointer_shared = typename Allocator_shared::const_pointer;
 
+  using buffer_alloc_type     = device_buffer_type<ComplexType>;
+  using shm_buffer_alloc_type = localTG_buffer_type<ComplexType>;
+
   using CVector       = boost::multi::array<ComplexType, 1, Allocator>;
   using CMatrix       = boost::multi::array<ComplexType, 2, Allocator>;
   using SPCMatrix     = boost::multi::array<SPComplexType, 2, SPAllocator>;
@@ -94,6 +102,13 @@ class PHMSD : public AFQMCInfo
   using mpi3CVector = boost::multi::array<ComplexType, 1, shared_allocator<ComplexType>>;
   using mpi3CMatrix = boost::multi::array<ComplexType, 2, shared_allocator<ComplexType>>;
 
+  using StaticVector  = boost::multi::static_array<ComplexType, 1, buffer_alloc_type>;
+  using StaticMatrix  = boost::multi::static_array<ComplexType, 2, buffer_alloc_type>;
+  using Static3Tensor = boost::multi::static_array<ComplexType, 3, buffer_alloc_type>;
+
+  using StaticSHMVector = boost::multi::static_array<ComplexType, 1, shm_buffer_alloc_type>;
+  using StaticSHMMatrix = boost::multi::static_array<ComplexType, 2, shm_buffer_alloc_type>;
+
 public:
   PHMSD(AFQMCInfo& info,
         xmlNodePtr cur,
@@ -110,6 +125,8 @@ public:
         int targetNW = 1)
       : AFQMCInfo(info),
         TG(tg_),
+        buffer_allocator(device_buffer_generator.get()),
+        shm_buffer_allocator(localTG_buffer_generator.get()),
         SDetOp(SlaterDetOperations_shared<ComplexType>(((wlk != NONCOLLINEAR) ? (NMO) : (2 * NMO)),
                                                        ((wlk != NONCOLLINEAR) ? (NAEA) : (NAEA + NAEB)))),
         HamOp(std::move(hop_)),
@@ -305,22 +322,16 @@ public:
   void Energy(WlkSet& wset)
   {
     int nw = wset.size();
-    if (ovlp.num_elements() != nw)
-      ovlp.reextent(iextensions<1u>{nw});
-    if (eloc.size(0) != nw || eloc.size(1) != 3)
-      eloc.reextent({nw, 3});
+    StaticVector ovlp(iextensions<1u>{nw}, buffer_allocator->template get_allocator<ComplexType>());
+    StaticMatrix eloc({nw, 3}, buffer_allocator->template get_allocator<ComplexType>());
     Energy(wset, eloc, ovlp);
     TG.local_barrier();
     if (TG.getLocalTGRank() == 0)
     {
-      int p = 0;
-      for (typename WlkSet::iterator it = wset.begin(); it != wset.end(); ++it, ++p)
-      {
-        *it->overlap() = ovlp[p];
-        *it->E1()      = eloc[p][0];
-        *it->EXX()     = eloc[p][1];
-        *it->EJ()      = eloc[p][2];
-      }
+      wset.setProperty(OVLP, ovlp);
+      wset.setProperty(E1_, eloc(eloc.extension(), 0));
+      wset.setProperty(EXX_, eloc(eloc.extension(), 1));
+      wset.setProperty(EJ_, eloc(eloc.extension(), 2));
     }
     TG.local_barrier();
   }
@@ -350,8 +361,7 @@ public:
   void MixedDensityMatrix(const WlkSet& wset, MatG&& G, bool compact = true, bool transpose = false)
   {
     int nw = wset.size();
-    if (ovlp.num_elements() != nw)
-      ovlp.reextent(iextensions<1u>{nw});
+    StaticVector ovlp(iextensions<1u>{nw}, buffer_allocator->template get_allocator<ComplexType>()); 
     MixedDensityMatrix(wset, std::forward<MatG>(G), ovlp, compact, transpose);
   }
 
@@ -422,8 +432,7 @@ public:
   void MixedDensityMatrix_for_vbias(const WlkSet& wset, MatG&& G)
   {
     int nw = wset.size();
-    if (ovlp.num_elements() != nw)
-      ovlp.reextent(iextensions<1u>{nw});
+    StaticVector ovlp(iextensions<1u>{nw}, buffer_allocator->template get_allocator<ComplexType>());
     MixedDensityMatrix(wset, std::forward<MatG>(G), ovlp, compact_G_for_vbias, transposed_G_for_vbias_);
   }
 
@@ -440,15 +449,12 @@ public:
   void Overlap(WlkSet& wset)
   {
     int nw = wset.size();
-    if (ovlp.num_elements() != nw)
-      ovlp.reextent(iextensions<1u>{nw});
+    StaticVector ovlp(iextensions<1u>{nw}, buffer_allocator->template get_allocator<ComplexType>());
     Overlap(wset, ovlp);
     TG.local_barrier();
     if (TG.getLocalTGRank() == 0)
     {
-      int p = 0;
-      for (typename WlkSet::iterator it = wset.begin(); it != wset.end(); ++it, ++p)
-        *it->overlap() = ovlp[p];
+      wset.setProperty(OVLP, ovlp);
     }
     TG.local_barrier();
   }
@@ -551,6 +557,9 @@ public:
 protected:
   TaskGroup_& TG;
 
+  device_allocator_generator_type* buffer_allocator;
+  localTG_allocator_generator_type* shm_buffer_allocator;
+
   //SlaterDetOperations_shared<ComplexType> SDetOp;
   SlaterDetOperations SDetOp;
 
@@ -621,6 +630,11 @@ protected:
   shmSPC3Tensor KEright;
   shmSPCMatrix KEleft;
 
+  // variables for energy sampling
+  bool sample_energy = false;
+  int nsamplesEX = 0;
+  int nsamplesEJ = 0;
+  int nsamplesE1 = 0;
 
   // array of sequence structure storing the list of connected alpha/beta configurations
   std::array<index_aos, 2> det_couplings;
@@ -633,10 +647,6 @@ protected:
   CMatrix extendedMatBeta;
   std::pair<int, int> maxOccupExtendedMat;
   std::pair<int, int> numExcitations;
-
-  // buffers and work arrays, careful here!!!
-  CVector ovlp, localGbuff, ovlp2;
-  CMatrix eloc, eloc2, eloc3;
 
   MPI_Request req_Gsend, req_Grecv;
   MPI_Request req_SMsend, req_SMrecv;
@@ -654,6 +664,15 @@ protected:
      */
   template<class WlkSet, class Mat, class TVec>
   void Energy_distributed(const WlkSet& wset, Mat&& E, TVec&& Ov);
+
+  /*
+     * Calculates the local energy and overlaps of all the walkers in the set and 
+     * returns them in the appropriate data structures
+     * Instead of calculating the sum over all determinants exactly,
+     * a stochastic sample of the energy is provided.
+     */
+  template<class WlkSet, class Mat, class TVec>
+  void Energy_sampled_shared(const WlkSet& wset, Mat&& E, TVec&& Ov);
 
   /* 
      * Computes the density matrix with respect to a given reference. 
