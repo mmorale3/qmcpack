@@ -336,18 +336,15 @@ public:
     if (E.size(0) != nwalk || E.size(1) < 3)
       APP_ABORT(" Error in AFQMC/HamiltonianOperations/KP3IndexFactorization::energy(). Incorrect matrix dimensions \n");
 
-    size_t mem_needs(nwalk * nkpts * nkpts * nspin * nocca_max * nmo_max * npol);
+    size_t mem_needs(0);
     size_t cnt(0);
+    if(addEXX) mem_needs+=(nwalk * nkpts * nkpts * nspin * nocca_max * nmo_max * npol);
     if (addEJ)
     {
-#if MIXED_PRECISION
-      mem_needs += 2 * nwalk * local_nCV;
-#else
       if (not getKr)
         mem_needs += nwalk * local_nCV;
       if (not getKl)
         mem_needs += nwalk * local_nCV;
-#endif
     }
     set_shm_buffer(mem_needs);
 
@@ -359,13 +356,6 @@ public:
       Knr = nwalk;
       Knc = local_nCV;
       cnt = 0;
-#if MIXED_PRECISION
-      if (getKr)
-      {
-        assert(KEright->size(0) == nwalk && KEright->size(1) == local_nCV);
-        assert(KEright->stride(0) == KEright->size(1));
-      }
-#else
       if (getKr)
       {
         assert(KEright->size(0) == nwalk && KEright->size(1) == local_nCV);
@@ -373,18 +363,10 @@ public:
         Krptr = to_address(KEright->origin());
       }
       else
-#endif
       {
         Krptr = to_address(SM_TMats.origin());
         cnt += nwalk * local_nCV;
       }
-#if MIXED_PRECISION
-      if (getKl)
-      {
-        assert(KEleft->size(0) == nwalk && KEleft->size(1) == local_nCV);
-        assert(KEleft->stride(0) == KEleft->size(1));
-      }
-#else
       if (getKl)
       {
         assert(KEleft->size(0) == nwalk && KEleft->size(1) == local_nCV);
@@ -392,7 +374,6 @@ public:
         Klptr = to_address(KEleft->origin());
       }
       else
-#endif
       {
         Klptr = to_address(SM_TMats.origin()) + cnt;
         cnt += nwalk * local_nCV;
@@ -413,28 +394,21 @@ public:
       std::fill_n(E[n].origin(), 3, ComplexType(0.));
 
     assert(Gc.num_elements() == nwalk * (nocca_tot + noccb_tot) * npol * nmo_tot);
-    boost::multi::array_cref<ComplexType, 3> G3Da(to_address(Gc.origin()), {nocca_tot * npol, nmo_tot, nwalk});
-    boost::multi::array_cref<ComplexType, 3> G3Db(to_address(Gc.origin()) + G3Da.num_elements() * (nspin - 1),
+    boost::multi::array_cref<ComplexType, 3> G3Da(to_address(Gc.origin()), 
+                                                  {nocca_tot * npol, nmo_tot, nwalk});
+    boost::multi::array_cref<ComplexType, 3> G3Db(to_address(Gc.origin()) + 
+                                                  G3Da.num_elements() * (nspin - 1),
                                                   {noccb_tot, nmo_tot, nwalk});
-
-
-    // with yet another mapping, it is possible to reduce the memory usage here!
-    // avoiding for now!
-    Sp4Tensor_ref GKK(to_address(SM_TMats.origin()) + cnt, {nspin, nkpts, nkpts, nwalk * npol * nmo_max * nocca_max});
-    GKaKjw_to_GKKwaj(nd, Gc, GKK, nocca_tot, noccb_tot, nmo_tot, nmo_max * nocca_max);
-    comm->barrier();
 
     // one-body contribution
     // haj[ndet*nkpts][nocc*nmo]
-    if (addH1)
+    if (addH1 and not addEXX)
     {
       int na = 0, nk = 0, nb = 0;
       for (int n = 0; n < nwalk; n++)
         E[n][0] = E0;
       for (int K = 0; K < nkpts; ++K)
       {
-#ifdef MIXED_PRECISION
-        // must use Gc since GKK is is SP
         boost::multi::array_ref<ComplexType, 3> haj_K(to_address(haj[nd * nkpts + K].origin()),
                                                       {nelpk[nd][K], npol, nopk[K]});
         for (int a = 0; a < nelpk[nd][K]; ++a)
@@ -447,33 +421,71 @@ public:
           boost::multi::array_ref<ComplexType, 2> haj_Kb(haj_K.origin() + haj_K.num_elements(),
                                                          {nelpk[nd][nkpts + K], nopk[K]});
           for (int b = 0; b < nelpk[nd][nkpts + K]; ++b)
-            ma::product(ComplexType(1.), ma::T(G3Db[nb + b].sliced(nk, nk + nopk[K])), haj_Kb[b], ComplexType(1.),
-                        E(E.extension(0), 0));
+            ma::product(ComplexType(1.), ma::T(G3Db[nb + b].sliced(nk, nk + nopk[K])), haj_Kb[b], 
+                        ComplexType(1.), E(E.extension(0), 0));
           nb += nelpk[nd][nkpts + K];
         }
         nk += nopk[K];
-#else
-        // use GKK
-        nk = nopk[K];
-        {
-          na = nelpk[nd][K];
-          CVector_ref haj_K(to_address(haj[nd * nkpts + K].origin()), {na * npol * nk});
-          SpMatrix_ref Gaj(to_address(GKK[0][K][K].origin()), {nwalk, na * npol * nk});
-          ma::product(ComplexType(1.), Gaj, haj_K, ComplexType(1.), E(E.extension(0), 0));
-        }
-        if (walker_type == COLLINEAR)
-        {
-          na = nelpk[nd][nkpts + K];
-          CVector_ref haj_K(to_address(haj[nd * nkpts + K].origin()) + nelpk[nd][K] * nk, {na * nk});
-          SpMatrix_ref Gaj(to_address(GKK[1][K][K].origin()), {nwalk, na * nk});
-          ma::product(ComplexType(1.), Gaj, haj_K, ComplexType(1.), E(E.extension(0), 0));
-        }
-#endif
       }
     }
 
     if (addEXX)
     {
+
+      Sp4Tensor_ref GKK(to_address(SM_TMats.origin()) + cnt, {nspin, nkpts, nkpts, nwalk * npol * nmo_max * nocca_max});
+      GKaKjw_to_GKKwaj(nd, Gc, GKK, nocca_tot, noccb_tot, nmo_tot, nmo_max * nocca_max);
+      comm->barrier();
+
+      // MAM
+      // do H1 here if requesting EXX to be able to use GKK if needed!
+      // one-body contribution
+      // haj[ndet*nkpts][nocc*nmo]
+      if (addH1)
+      { 
+        int na = 0, nk = 0, nb = 0;
+        for (int n = 0; n < nwalk; n++)
+          E[n][0] = E0; 
+        for (int K = 0; K < nkpts; ++K)
+        {
+#ifdef MIXED_PRECISION
+          // must use Gc since GKK is is SP
+          boost::multi::array_ref<ComplexType, 3> haj_K(to_address(haj[nd * nkpts + K].origin()),
+                                                      {nelpk[nd][K], npol, nopk[K]});
+          for (int a = 0; a < nelpk[nd][K]; ++a)
+            for (int pol = 0; pol < npol; ++pol)
+              ma::product(ComplexType(1.), ma::T(G3Da[(na + a)*npol+pol].sliced(nk, nk + nopk[K])),
+                  haj_K[a][pol], ComplexType(1.), E(E.extension(0), 0));
+          na += nelpk[nd][K];
+          if (walker_type == COLLINEAR)
+          { 
+            boost::multi::array_ref<ComplexType, 2> haj_Kb(haj_K.origin() + haj_K.num_elements(),
+                                                           {nelpk[nd][nkpts + K], nopk[K]});
+            for (int b = 0; b < nelpk[nd][nkpts + K]; ++b) 
+              ma::product(ComplexType(1.), ma::T(G3Db[nb + b].sliced(nk, nk + nopk[K])), haj_Kb[b], 
+                          ComplexType(1.), E(E.extension(0), 0));
+            nb += nelpk[nd][nkpts + K];
+          }
+          nk += nopk[K];
+#else   
+          // use GKK
+          nk = nopk[K];
+          { 
+            na = nelpk[nd][K];
+            CVector_ref haj_K(to_address(haj[nd * nkpts + K].origin()), {na * npol * nk});
+            SpMatrix_ref Gaj(to_address(GKK[0][K][K].origin()), {nwalk, na * npol * nk});
+            ma::product(ComplexType(1.), Gaj, haj_K, ComplexType(1.), E(E.extension(0), 0));
+          }
+          if (walker_type == COLLINEAR)
+          { 
+            na = nelpk[nd][nkpts + K];
+            CVector_ref haj_K(to_address(haj[nd * nkpts + K].origin()) + nelpk[nd][K] * nk, {na * nk});
+            SpMatrix_ref Gaj(to_address(GKK[1][K][K].origin()), {nwalk, na * nk});
+            ma::product(ComplexType(1.), Gaj, haj_K, ComplexType(1.), E(E.extension(0), 0));
+          }
+#endif
+        }
+      }
+
       size_t local_memory_needs = 2 * nwalk * nocca_max * nocca_max * nchol_max + 
                                   2 * nchol_max * nwalk;
       if (TMats.num_elements() < local_memory_needs)
@@ -634,8 +646,7 @@ public:
     {
       if (not addEXX)
       {
-        // calculate Kr
-        APP_ABORT(" Error: Finish addEJ and not addEXX");
+        calculate_Kl_Kr(nd,Gc,Kl,Kr);
       }
       comm->barrier();
       size_t nqk     = 0;
@@ -655,22 +666,6 @@ public:
           }
         }
       }
-#if MIXED_PRECISION
-      if (getKl)
-      {
-        size_t i0, iN;
-        std::tie(i0, iN) =
-            FairDivideBoundary(size_t(comm->rank()), size_t(KEleft->num_elements()), size_t(comm->size()));
-        copy_n_cast(Klptr + i0, iN - i0, to_address(KEleft->origin()) + i0);
-      }
-      if (getKr)
-      {
-        size_t i0, iN;
-        std::tie(i0, iN) =
-            FairDivideBoundary(size_t(comm->rank()), size_t(KEright->num_elements()), size_t(comm->size()));
-        copy_n_cast(Krptr + i0, iN - i0, to_address(KEright->origin()) + i0);
-      }
-#endif
       comm->barrier();
     }
   }
@@ -1147,7 +1142,6 @@ public:
     boost::multi::array_ref<vType, 3> v3D(to_address(v.origin()), {nwalk, nmo_tot, nmo_tot});
 
     sp_pointer Xptr(nullptr);
-    // I WANT C++17!!!!!!
     using XType = typename std::decay<MatA>::type::element;
     if (std::is_same<SPComplexType, XType>::value)
     {
@@ -1750,6 +1744,196 @@ private:
     for (int w = 0; w < nwalk; w++)
       for (int AK = 0; AK < nAK; AK++)
         GAKw[AK][w] = GwAK[w][AK];
+  }
+
+  // I'm pretty sure this is doing twice the work, but figure it out later
+  //   - vl(Q) == vr(-Q) when Q != -Q  ( I think ... )
+  template<class MatA,
+           class MatB,
+           class MatC,
+           typename = typename std::enable_if_t<(std::decay<MatA>::type::dimensionality == 2)>,
+           typename = typename std::enable_if_t<(std::decay<MatB>::type::dimensionality == 2)>,
+           typename = typename std::enable_if_t<(std::decay<MatC>::type::dimensionality == 2)>>
+  void calculate_Kl_Kr(int nd, const MatA& Gw, MatB& Kl, MatC& Kr)
+  {
+    using std::copy_n;
+    using GType = typename std::decay_t<typename MatA::element>;
+    int nkpts   = nopk.size();
+    assert(nd >= 0 && nd < nelpk.size());
+    int nwalk = Gw.size(1);
+    assert(Kl.size(0) == nwalk);
+    assert(Kl.size(1) == local_nCV);
+    assert(Kr.size(0) == nwalk);
+    assert(Kr.size(1) == local_nCV);
+    int nspin     = (walker_type == COLLINEAR ? 2 : 1);
+    int npol      = (walker_type == NONCOLLINEAR ? 2 : 1);
+    int nmo_tot   = std::accumulate(nopk.begin(), nopk.end(), 0);
+    int nmo_max   = *std::max_element(nopk.begin(), nopk.end());
+    int nocca_tot = std::accumulate(nelpk[nd].begin(), nelpk[nd].begin() + nkpts, 0);
+    int nocca_max = *std::max_element(nelpk[nd].begin(), nelpk[nd].begin() + nkpts);
+    int noccb_max = nocca_max;
+    int nchol_max = *std::max_element(ncholpQ.begin(), ncholpQ.end());
+    int noccb_tot = 0;
+    if (walker_type == COLLINEAR)
+    {
+      noccb_tot = std::accumulate(nelpk[nd].begin() + nkpts, nelpk[nd].begin() + 2 * nkpts, 0);
+      noccb_max = *std::max_element(nelpk[nd].begin() + nkpts, nelpk[nd].begin() + 2 * nkpts);
+    }
+    RealType scl = (walker_type == CLOSED ? 2.0 : 1.0);
+    SPComplexType one(1.0, 0.0);
+    SPComplexType half(0.5 * scl, 0.0);
+    SPComplexType minusimhalf(0.0, -0.5 * scl);
+    SPComplexType imhalf(0.0, 0.5 * scl);
+    size_t local_memory_needs = 2 * nchol_max * nwalk;
+    if(walker_type == NONCOLLINEAR)
+      local_memory_needs += nmo_max * npol * nwalk; // for transposed G
+    if (TMats.num_elements() < local_memory_needs)
+      TMats.reextent({local_memory_needs, 1});
+    Sp3Tensor_ref K_local(TMats.origin(), {2, nwalk, nchol_max});
+    std::fill_n(K_local.origin(), K_local.num_elements(), SPComplexType(0.0));
+
+    assert(Gw.num_elements() == nwalk * (nocca_tot + noccb_tot) * npol * nmo_tot);
+    const_sp_pointer Gptr(nullptr);
+    if (std::is_same<SPComplexType, GType>::value)
+    {
+      Gptr = reinterpret_cast<const_sp_pointer>(to_address(Gw.origin()));
+    }
+    else
+    {
+      size_t mem_needs = Gw.num_elements();
+      set_shm_buffer(mem_needs);
+      {
+        size_t i0, iN;
+        std::tie(i0, iN) = FairDivideBoundary(size_t(comm->rank()), size_t(Gw.num_elements()), size_t(comm->size()));
+        copy_n_cast(to_address(Gw.origin()) + i0, iN - i0, to_address(SM_TMats.origin()) + i0);
+      }
+      Gptr = to_address(SM_TMats.origin());
+      comm->barrier();
+    }
+
+    boost::multi::array_cref<SPComplexType, 4> G3Da(Gptr, {nocca_tot, npol, nmo_tot, nwalk});
+    boost::multi::array_cref<SPComplexType, 3> G3Db(Gptr + G3Da.num_elements() * (nspin - 1),
+                                                    {noccb_tot, nmo_tot, nwalk});
+    comm->barrier();
+
+    size_t nqk = 0; 
+    for (int Ka = 0; Ka < nkpts; ++Ka)
+    { // K is the index of the kpoint pair of (a,k)
+      for (int Q = 0; Q < nkpts; ++Q)
+      { // momentum conservation index
+        if (Qmap[Q] < 0)
+          continue;
+        bool haveV = false;
+        if ((nqk++) % comm->size() == comm->rank())
+        {
+          haveV     = true;
+          int nchol = ncholpQ[Q];
+          int Qm    = kminus[Q];
+          int Kl    = QKToK2[Qm][Ka];
+          int Kk    = QKToK2[Q][Ka];
+          int na    = nelpk[nd][Ka];
+          int nl    = nopk[Kl];
+          int nk    = nopk[Kk];
+          int na0   = std::accumulate(nelpk[nd].begin(), nelpk[nd].begin() + Ka, 0);
+          int nk0   = std::accumulate(nopk.begin(), nopk.begin() + Kk, 0);
+          int nl0   = std::accumulate(nopk.begin(), nopk.begin() + Kl, 0);
+          auto&& vl = K_local[0]({0, nwalk}, {0, nchol});
+          auto&& vr = K_local[1]({0, nwalk}, {0, nchol});
+
+          if (walker_type == NONCOLLINEAR) {
+            Sp3Tensor_ref Lank(to_address(LQKank[nd * nspin * nkpts + Q][Ka].origin()), {na, nchol, npol*nk});
+
+            SPComplexType* bnl_ptr(to_address(LQKank[nd * nspin * nkpts + Qm][Ka].origin()));
+            if (Q == Qm)
+              bnl_ptr = to_address(LQKbnl[nd * nspin * number_of_symmetric_Q + Qmap[Q] - 1][Ka].origin());
+            Sp3Tensor_ref Lbnl(bnl_ptr, {na, nchol, nl});
+
+            // vl[Q][n][nw] += sum_K sum_a_p_k LQK[a][n][p][k] G[a][p][k][nw]
+            for (int a = 0; a < na; ++a) {
+              SpMatrix_ref Ga( to_address(K_local.origin())+K_local.num_elements(), {npol*nk,nwalk} );
+              SpMatrix_ref Ga_( Ga.origin(), {npol,nk*nwalk} );
+              for(int p=0; p<npol; p++)
+                copy_n(to_address(G3Da[na0 + a][p][nk0].origin()),nk*nwalk,Ga_[p].origin());
+              ma::product(one, ma::T(Ga), ma::T(Lank[a]), one, vl);
+            }
+            // vr[Q][n][nw] += sum_K sum_a_p_k LQK[a][n][p][k] G[a][p][k][nw]
+            for (int a = 0; a < na; ++a) {
+              SpMatrix_ref Ga( to_address(K_local.origin())+K_local.num_elements(), {npol*nl,nwalk} );         
+              SpMatrix_ref Ga_( Ga.origin(), {npol,nl*nwalk} );
+              for(int p=0; p<npol; p++)
+                copy_n(to_address(G3Da[na0 + a][p][nl0].origin()),nl*nwalk,Ga_[p].origin());
+              ma::product(one, ma::T(Ga), ma::T(Lbnl[a]), one, vr);
+            }
+          } else {
+            Sp3Tensor_ref Lank(to_address(LQKank[nd * nspin * nkpts + Q][Ka].origin()), {na, nchol, nk});
+            SPComplexType* bnl_ptr(to_address(LQKank[nd * nspin * nkpts + Qm][Ka].origin()));
+            if (Q == Qm)
+              bnl_ptr = to_address(LQKbnl[nd * nspin * number_of_symmetric_Q + Qmap[Q] - 1][Ka].origin());   
+            Sp3Tensor_ref Lbnl(bnl_ptr, {na, nchol, nl});
+          
+            // vl[Q][n][nw] += sum_K sum_a_k LQK[a][n][k] G[a][k][nw]
+            for (int a = 0; a < na; ++a)
+              ma::product(one, ma::T(G3Da[na0 + a][0]({nk0, nk0 + nk}, {0, nwalk})), 
+                               ma::T(Lank[a]), one, vl);
+
+            // vr[Q][n][nw] += sum_K sum_a_l LQKbnl[a][n][l] G[a][l][nw]
+            for (int a = 0; a < na; ++a)
+              ma::product(one, ma::T(G3Da[na0 + a][0]({nl0, nl0 + nl}, {0, nwalk})), 
+                               ma::T(Lbnl[a]), one, vr);
+          }  
+        }
+        if (walker_type == COLLINEAR)
+        {
+          if ((nqk++) % comm->size() == comm->rank())
+          {
+            haveV     = true;
+            int nchol = ncholpQ[Q];
+            int Qm    = kminus[Q];
+            int Kl    = QKToK2[Qm][Ka];
+            int Kk    = QKToK2[Q][Ka];
+            int na    = nelpk[nd][nkpts + Ka];
+            int nl    = nopk[Kl];
+            int nk    = nopk[Kk];
+            int na0   = std::accumulate(nelpk[nd].begin() + nkpts, 
+                                        nelpk[nd].begin() + nkpts + Ka, 0);
+            int nk0   = std::accumulate(nopk.begin(), nopk.begin() + Kk, 0);
+            int nl0   = std::accumulate(nopk.begin(), nopk.begin() + Kl, 0);
+            auto&& vl = K_local[0]({0, nwalk}, {0, nchol});
+            auto&& vr = K_local[1]({0, nwalk}, {0, nchol});
+
+            Sp3Tensor_ref Lank(to_address(LQKank[(nd * nspin + 1) * nkpts + Q][Ka].origin()), {na, nchol, nk});
+            SPComplexType* bnl_ptr(to_address(LQKank[nd * nspin * nkpts + Qm][Ka].origin()));
+            if (Q == Qm)
+              bnl_ptr = to_address(LQKbnl[nd * nspin * number_of_symmetric_Q + Qmap[Q] - 1][Ka].origin());   
+            Sp3Tensor_ref Lbnl(bnl_ptr, {na, nchol, nl});
+
+            // v1[Q][n][nw] += sum_K sum_a_k LQK[a][n][k] G[a][k][nw]
+            for (int a = 0; a < na; ++a)
+              ma::product(one, ma::T(G3Db[na0 + a]({nk0, nk0 + nk}, {0, nwalk})), 
+                               ma::T(Lank[a]), one, vl);
+            for (int a = 0; a < na; ++a)
+              ma::product(one, ma::T(G3Db[na0 + a]({nl0, nl0 + nl}, {0, nwalk})), 
+                               ma::T(Lbnl[a]), one, vr);
+          }
+        }
+        if (haveV)
+        {
+          {
+            std::lock_guard<shared_mutex> guard(*mutex[Q]);
+            int nc0 = std::accumulate(ncholpQ.begin(), ncholpQ.begin() + Q, 0);
+            auto&& vl = K_local[0]({0, nwalk}, {0, ncholpQ[Q]});
+            ma::axpy(SPComplexType(1.0), vl, Kl.sliced(nc0, nc0 + ncholpQ[Q]));
+            auto&& vr = K_local[1]({0, nwalk}, {0, ncholpQ[Q]});
+            ma::axpy(SPComplexType(1.0), vr, Kr.sliced(nc0, nc0 + ncholpQ[Q]));
+          }  
+        } // to release the lock
+
+        if (haveV)
+          std::fill_n(K_local.origin(), K_local.num_elements(), SPComplexType(0.0));
+
+      }
+    }
+    comm->barrier();
   }
 };
 

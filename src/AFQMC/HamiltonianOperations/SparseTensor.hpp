@@ -219,6 +219,8 @@ public:
 #else
     auto& Gsp(Gc);
 #endif
+    if(not addEXX && addEJ && not separateEJ)
+      APP_ABORT("Error: SparseTensor::energy: separateEJ=false and addEXX=false. \n\n\n");
 
     // one-body contribution
     if (addH1)

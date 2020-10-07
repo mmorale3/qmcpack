@@ -20,6 +20,7 @@
 #include <tuple>
 #include <mutex>
 
+#include "Utilities/Timer.h"
 #include "AFQMC/config.h"
 #include "AFQMC/Numerics/csr_blas.hpp"
 #include "AFQMC/Wavefunctions/PHMSD.hpp"
@@ -37,8 +38,10 @@ namespace afqmc
 template<class WlkSet, class Mat, class TVec>
 void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
 {
+qmcplusplus::Timer Time;
   using ma::conj;
   using std::get;
+  using std::fill_n;
   int nspins  = 2; //(walker_type==COLLINEAR?2:1);
   size_t nkev = HamOp.number_of_ke_vectors();
   assert(E.dimensionality == 2);
@@ -48,26 +51,30 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
   assert(E.size(1) == 3);
 
   ComplexType zero(0.0);
-  auto Gsize = dm_size(false);
   auto nwalk = wset.size();
   double LogOverlapFactor(wset.getLogOverlapFactor());
-  // resize shm structures if needed
-  if (Ovmsd.shape() != std::make_tuple(long(nspins), long(maxn_unique_confg), long(nwalk)))
-    Ovmsd.reextent({nspins, maxn_unique_confg, nwalk});
-  if (Emsd.shape() != std::make_tuple(long(nspins), long(maxn_unique_confg), long(nwalk), 3l))
-    Emsd.reextent({nspins, maxn_unique_confg, nwalk, 3});
-  // resize Alpha here, if beta is needed resize below
-  if (GrefA.shape() != std::make_tuple(nwalk, dm_dims(false, Alpha).first, dm_dims(false, Alpha).second))
-    GrefA.reextent({nwalk, dm_dims(false, Alpha).first, dm_dims(false, Alpha).second});
-  if (wgt.size() != nwalk)
-    wgt.reextent(iextensions<1u>{nwalk});
-  if (opSpinEJ.size() != nwalk)
-    opSpinEJ.reextent(iextensions<1u>{nwalk});
-  StaticMatrix eloc2({nwalk, 3}, buffer_allocator->template get_allocator<ComplexType>());
 
-  std::fill_n(Ov.origin(), nwalk, zero);
-  std::fill_n(E.origin(), 3 * nwalk, zero);
-  std::fill_n(opSpinEJ.origin(), nwalk, ComplexType(0.0));
+  StaticMatrix eloc2({nwalk, 3}, buffer_allocator->template get_allocator<ComplexType>());
+  StaticMatrix Qwork({2 * max_exct_n, max_exct_n}, 
+                        buffer_allocator->template get_allocator<ComplexType>());
+  StaticVector wgt(iextensions<1u>{nwalk},
+                        buffer_allocator->template get_allocator<ComplexType>());
+  StaticVector opSpinEJ(iextensions<1u>{nwalk},
+                        buffer_allocator->template get_allocator<ComplexType>());
+  StaticSHM3Tensor QQ0A({nwalk, OrbMats[0].size(0), NAEA},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+  StaticSHM3Tensor QQ0B({nwalk, OrbMats.back().size(0), NAEB},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+  StaticSHM3Tensor Ovmsd({nspins, maxn_unique_confg, nwalk},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+  StaticSHM4Tensor Emsd({nspins, maxn_unique_confg, nwalk, 3},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+  StaticSHM3Tensor GrefA({nwalk, dm_dims(false, Alpha).first, dm_dims(false, Alpha).second},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+
+  fill_n(Ov.origin(), nwalk, zero);
+  fill_n(E.origin(), 3 * nwalk, zero);
+  fill_n(opSpinEJ.origin(), nwalk, ComplexType(0.0));
 
   // dummy: ugly but not sure how to do it better
   SPCMatrix* dummyMatPtr(nullptr);
@@ -85,14 +92,8 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
   //    - Ovmsd[spin][nd_unique][iw]
   if (fast_ph_energy)
   {
-    // assume [nwalk][ik] for now. If needed, generalize later
-    if (GrefB.shape() != std::make_tuple(nwalk, dm_dims(false, Beta).first, dm_dims(false, Beta).second))
-      GrefB.reextent({nwalk, dm_dims(false, Beta).first, dm_dims(false, Beta).second});
-    if (QQ0A.shape() != std::make_tuple(nwalk, long(OrbMats[0].size(0)), NAEA))
-      QQ0A.reextent({nwalk, OrbMats[0].size(0), NAEA});
-    if (QQ0B.shape() != std::make_tuple(nwalk, long(OrbMats.back().size(0)), NAEB))
-      QQ0B.reextent({nwalk, OrbMats.back().size(0), NAEB});
-
+    StaticSHM3Tensor GrefB({nwalk, dm_dims(false, Beta).first, dm_dims(false, Beta).second}, 
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
     for (int iw = 0, nc = 0; iw < nwalk; iw++)
     {
       if (nc % TG.TG_local().size() == TG.TG_local().rank())
@@ -131,11 +132,11 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
   }
   else
   {
+    StaticSHMSPMatrix KEleft({nwalk, nkev},
+                        shm_buffer_allocator->template get_allocator<SPComplexType>());
+    StaticSHM3SPTensor KEright({abij.number_of_unique_excitations()[0], nwalk, nkev}, 
+                        shm_buffer_allocator->template get_allocator<SPComplexType>());
     ComplexType ov0;
-    if (KEright.shape() != std::make_tuple(long(abij.number_of_unique_excitations()[0]), long(nwalk), long(nkev)))
-      KEright.reextent({abij.number_of_unique_excitations()[0], nwalk, nkev});
-    if (KEleft.shape() != std::make_tuple(long(nwalk), long(nkev)))
-      KEleft.reextent({nwalk, nkev});
     for (int spin = 0; spin < nspins; ++spin)
     {
       int orb_spin_indx = (OrbMats.size() == 2) ? spin : 0;
@@ -287,6 +288,440 @@ void PHMSD::Energy_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
 /*
    * Calculates the local energy and overlaps of all the walkers in the set and 
    * returns them in the appropriate data structures
+   * Samples the energy when requested.
+  */
+template<class WlkSet, class Mat, class TVec>
+void PHMSD::Energy_sampled_shared(const WlkSet& wset, Mat&& E, TVec&& Ov)
+{
+qmcplusplus::Timer Time;
+
+  // serial for now
+  if(TG.TG_local().size() > 1)
+    APP_ABORT("Error: samples energy only working with ncore==1.\n\n\n");
+
+  using ma::conj;
+  using std::get;
+  using std::fill_n;
+  using std::copy_n;
+  int nspins  = 2; //(walker_type==COLLINEAR?2:1);
+  size_t nkev = HamOp.number_of_ke_vectors();
+  assert(E.dimensionality == 2);
+  assert(Ov.dimensionality == 1);
+  assert(E.size(0) == wset.size());
+  assert(Ov.size(0) == wset.size());
+  assert(E.size(1) == 3);
+
+  ComplexType zero(0.0);
+  auto nwalk = wset.size();
+  double LogOverlapFactor(wset.getLogOverlapFactor());
+  auto Gsize = dm_size(false);
+  auto Gdim_alpha = dm_dims(false, Alpha);
+  auto Gdim_beta = dm_dims(false, Beta);
+
+  fill_n(Ov.origin(), nwalk, zero);
+  fill_n(E.origin(), 3 * nwalk, zero);
+
+  StaticSHM3Tensor unique_ov({nwalk, 2, maxn_unique_confg},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+
+  // dummy: ugly but not sure how to do it better
+  SPCMatrix* dummyMatPtr(nullptr);
+
+  auto refc = abij.reference_configuration();
+  std::vector<int> confg(NAEA);
+  auto confgs = abij.configurations_begin();
+
+  if (walker_type != COLLINEAR)
+    APP_ABORT("Error: Finish implementation of PHMSD for CLOSED/NONCOLLINEAR walkers.\n");
+
+  // 1. Calculate overlaps, full Green function and accumulate exact 1-body energy
+  { // control scope to save memory
+    StaticSHMMatrix Gw({Gsize,nwalk},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+    StaticMatrix eloc({nwalk, 3}, buffer_allocator->template get_allocator<ComplexType>());
+
+    // extra transpositions, but can reuse routine
+    //  compact: true, transposed: false 
+    MixedDensityMatrix_impl(wset,Gw,Ov,unique_ov,true,false);
+
+    if(transposed_G_for_E_) {
+      // [nwalk][ak]  
+      StaticSHMMatrix Gw_({nwalk,OrbMats[0].size(0)*NMO},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+      ma::transpose(Gw.sliced(0,OrbMats[0].size(0)*NMO),Gw_); 
+      HamOp.energy(eloc, Gw_, 0, dummyMatPtr, dummyMatPtr, TG.TG_local().root(), false, false);
+    } else {
+      // [ak][nwalk]  
+      HamOp.energy(eloc, Gw.sliced(0,OrbMats[0].size(0)*NMO), 0, 
+                   dummyMatPtr, dummyMatPtr, TG.TG_local().root(), false, false);
+    }
+    if(TG.TG_local().root())
+      ma::axpy(ComplexType(1.0), eloc({0,nwalk},0), E({0,nwalk},0)); 
+
+    if(transposed_G_for_E_) {
+      // [nwalk][ak]  
+      StaticSHMMatrix Gw_({nwalk,OrbMats.back().size(0)*NMO},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+      ma::transpose(Gw.sliced(OrbMats[0].size(0)*NMO,Gsize),Gw_);     
+      HamOp.energy(eloc, Gw_, ((OrbMats.size() == 2) ? 1 : 0), 
+                   dummyMatPtr, dummyMatPtr, TG.TG_local().root(), false, false);
+    } else {
+      // [ak][nwalk]  
+      HamOp.energy(eloc, Gw.sliced(OrbMats[0].size(0)*NMO,Gsize), 
+                   ((OrbMats.size() == 2) ? 1 : 0), dummyMatPtr, dummyMatPtr, 
+                   TG.TG_local().root(), false, false);
+    }
+    if(TG.TG_local().root())
+      ma::axpy(ComplexType(1.0), eloc({0,nwalk},0), E({0,nwalk},0)); 
+  }  
+  TG.local_barrier();
+
+
+  // 2. same spin diagonal EJ and EXX
+  for (int iw = 0; iw < nwalk; ++iw)
+  {
+    for (int spin = 0; spin < nspins; ++spin)
+    {
+      int nsamples(nsamples_base + nsamples_same);
+      int orb_spin_indx = (OrbMats.size() == 2) ? spin : 0;
+      int wlk_spin_indx = (walker_type == CLOSED) ? 0 : spin;
+      int other_spin = (walker_type == CLOSED) ? 0 : 1-spin;
+      confg.resize((spin == 0) ? NAEA : NAEB);
+      auto Gdims     = dm_dims(false, SpinTypes(spin));
+      auto Gdims_ref = dm_dims_ref(false, SpinTypes(spin));
+
+      auto SM_ptr(wset[iw].SlaterMatrix(SpinTypes(wlk_spin_indx)));
+
+      if(nsamples == 0) nsamples = n_unique_dets[spin];
+      // no actual sampling yet!  
+
+      StaticSHMVector unique_wgt(iextensions<1u>{n_unique_dets[spin]},
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+      StaticSHMVector weights(iextensions<1u>{nsamples}, 
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+      StaticSHMIVector dets(iextensions<1u>{nsamples}, 
+                        shm_buffer_allocator->template get_allocator<int>());
+      StaticMatrix eloc({nsamples, 3}, 
+                        buffer_allocator->template get_allocator<ComplexType>());
+
+      // a. generate/sample contracted weights
+      if(TG.TG_local().root()) { 
+        ma::product(OpSpinDetCouplings[spin],
+                unique_ov[iw][other_spin].sliced(0,n_unique_dets[other_spin]), unique_wgt);
+        if(nsamples_same>0) {
+          // sample weights according to unique_wgt
+          //copy_n(make_device_ptr(unique_wgt.origin()),unique_wgt.size(),
+          //       make_device_ptr(weights.origin()));     
+          //for(int i=0; i<nsamples; i++) dets[i]=i;
+// generate cumulative DF and sample using bisection 
+
+          for(int i=0; i<nsamples_base; i++)           
+            unique_wgt[i] *= (unique_ov[iw][spin][i]/Ov[iw]);
+          copy_n(make_device_ptr(unique_wgt.origin()),nsamples_base,
+                 make_device_ptr(weights.origin()));
+          for(int i=0; i<nsamples_base; i++) dets[i]=i;
+
+          double pnorm(0.0);
+          for(int i=nsamples_base; i<n_unique_dets[spin]; i++) {
+            unique_wgt[i] *= (unique_ov[iw][spin][i]/Ov[iw]);
+            pnorm += std::abs(unique_wgt[i]); 
+          }
+          if( pnorm < 1e-6 ) {
+            // in case all excited dets beyond nsamples_base are nearly orthogonal
+            // which happens always in the first call...
+            for(int i=nsamples_base; i<n_unique_dets[spin]; i++) {
+              dets[i]=0;
+              weights[i]=ComplexType(0.0);
+            }
+          } else { 
+            for(int is=nsamples_base; is<nsamples; is++) {
+              double psum(0.0);
+              double irng(distribution(generator));
+              for(int i=nsamples_base; i<n_unique_dets[spin]; i++) {
+                psum += std::abs(unique_wgt[i])/pnorm;
+                if(psum > irng) {
+                  dets[is] = i;
+                  weights[is] = unique_wgt[i]*pnorm/std::abs(unique_wgt[i])/ComplexType(1.0*nsamples_same);
+                  break;
+                }    
+              }
+            }
+          } 
+        } else {
+          for(int i=0; i<nsamples; i++) 
+            unique_wgt[i] *= (unique_ov[iw][spin][i]/Ov[iw]);
+          copy_n(make_device_ptr(unique_wgt.origin()),nsamples,
+                 make_device_ptr(weights.origin()));     
+          for(int i=0; i<nsamples; i++) dets[i]=i;
+        }    
+      }
+      TG.TG_local().barrier();  
+
+      // b. calculae Green functions for the selected determinant configurations
+      //    eventually loop over blocks!
+      StaticMatrix G2D_({Gdims_ref.first, Gdims_ref.second},
+                            buffer_allocator->template get_allocator<ComplexType>());
+      int nr = Gdims.first * Gdims.second, nc = nsamples;
+      if (transposed_G_for_E_)
+        std::swap(nr, nc);
+      StaticSHMMatrix G({nr, nc}, 
+                        shm_buffer_allocator->template get_allocator<ComplexType>());
+
+// do this with batched interface! no more double implementation!!!
+// no nextra here, but use fair divide and batched inside the segment!!!
+// debugging for now
+      for (int nd = 0; nd < nsamples; ++nd)
+      {
+        // keeping this simple for now!
+        if (nd % TG.TG_local().size() == TG.TG_local().rank())
+        {
+          abij.get_configuration(spin, dets[nd], confg);
+          ComplexType ov =  
+              SDetOp.MixedDensityMatrixFromConfiguration(OrbMats[orb_spin_indx],*SM_ptr,
+                                        G2D_, LogOverlapFactor, confg.data(), true);
+          if (transposed_G_for_E_)
+          {
+            boost::multi::array_ref<ComplexType, 3> G3D(make_device_ptr(G.origin()), {nsamples, Gdims.first, Gdims.second});
+            fill_n(G[nd].origin(), Gdims.first * Gdims.second, ComplexType(0.0));
+            for (int k = 0; k < confg.size(); ++k)
+              G3D[nd][confg[k]] = G2D_[k];
+          }
+          else
+          {
+            boost::multi::array_ref<ComplexType, 3> G3D(make_device_ptr(G.origin()), {Gdims.first, Gdims.second, nsamples});
+            for (int k = 0; k < Gdims.first; ++k)
+              for (int j = 0; j < Gdims.second; ++j)
+                G3D[k][j][nd] = ComplexType(0.0);
+            for (int k = 0; k < confg.size(); ++k)
+              G3D[confg[k]]({0, Gdims.second}, nd) = G2D_[k];
+          }
+        }
+      }
+      TG.TG_local().barrier();
+
+      // c. evaluate energies and accumulate
+      HamOp.energy(eloc, G, orb_spin_indx, false, true, true);
+      TG.TG_local().all_reduce_in_place_n(to_address(eloc.origin()), 
+                                            eloc.num_elements(), std::plus<>()); 
+      ma::product( ComplexType(1.0), ma::T(eloc({0,nsamples},{1,3})), weights, 
+                   ComplexType(1.0), E[iw].sliced(1,3) );  
+      TG.TG_local().barrier();
+        
+    }
+  }
+
+  int nsamples(nsamples_opp);
+  if(nsamples==0) nsamples = abij.number_of_configurations();  
+  nsamples = abij.number_of_configurations();
+  StaticSHMVector all_wgt(iextensions<1u>{abij.number_of_configurations()},
+                      shm_buffer_allocator->template get_allocator<ComplexType>());
+  StaticSHMVector selected_wgt(iextensions<1u>{nsamples},
+                      shm_buffer_allocator->template get_allocator<ComplexType>());
+  StaticSHMLVector all_det_id(iextensions<1u>{abij.number_of_configurations()},
+                      shm_buffer_allocator->template get_allocator<long>());
+  StaticSHMLVector selected_det_id(iextensions<1u>{nsamples},
+                      shm_buffer_allocator->template get_allocator<long>());
+  StaticSHMIVector map_alpha(iextensions<1u>{n_unique_dets[0]},
+                      shm_buffer_allocator->template get_allocator<int>());
+  StaticSHMIVector map_beta(iextensions<1u>{n_unique_dets[1]},
+                      shm_buffer_allocator->template get_allocator<int>());
+  StaticSHMIVector invmap_alpha(iextensions<1u>{n_unique_dets[0]},
+                      shm_buffer_allocator->template get_allocator<int>());
+  StaticSHMIVector invmap_beta(iextensions<1u>{n_unique_dets[1]},
+                      shm_buffer_allocator->template get_allocator<int>());
+
+  // 3. add spin offdiagonal EJ 
+  for (int iw = 0; iw < nwalk; ++iw)
+  {
+    // a. generate/sample contracted weights
+    if(TG.TG_local().root()) {
+      int ni = 0;
+      for (auto it = abij.configurations_begin(); it < abij.configurations_end(); ++it, ++ni)
+      {  
+        all_wgt[ni] = ma::conj(std::get<2>(*it)) * unique_ov[iw][0][std::get<0>(*it)] *
+                            unique_ov[iw][1][std::get<1>(*it)] / Ov[iw]; 
+        all_det_id[ni] = long(std::get<0>(*it))*long(n_unique_dets[1]) + long(std::get<1>(*it));
+      }
+   
+      if(nsamples_opp>0) {
+        // sample weights according to all_wgt 
+        copy_n(make_device_ptr(all_wgt.origin()),all_wgt.size(),
+               make_device_ptr(selected_wgt.origin()));
+        copy_n(make_device_ptr(all_det_id.origin()),all_det_id.size(),
+               make_device_ptr(selected_det_id.origin()));
+      } else {
+        copy_n(make_device_ptr(all_wgt.origin()),all_wgt.size(),
+               make_device_ptr(selected_wgt.origin()));
+        copy_n(make_device_ptr(all_det_id.origin()),all_det_id.size(),
+               make_device_ptr(selected_det_id.origin()));
+      }
+      fill_n(make_device_ptr(map_alpha.origin()),map_alpha.size(),-1);
+      fill_n(make_device_ptr(map_beta.origin()),map_beta.size(),-1);
+
+// sort arrays and do binary search to locate the 'a' index
+      int na(0);
+      int nb(0);
+      for(int i=0; i<nsamples; i++) {
+        int a = int(selected_det_id[i]/long(n_unique_dets[1])); 
+        int b = int(selected_det_id[i]%long(n_unique_dets[1])); 
+        if(map_alpha[a] < 0)  {
+          invmap_alpha[na] = a;
+          map_alpha[a] = na++;
+        }
+        if(map_beta[b] < 0)  {
+          invmap_beta[nb] = b;
+          map_beta[b] = nb++;
+        }
+      }    
+    }
+    TG.TG_local().barrier();
+
+    int n_alpha(0);
+    for(int i=0; i<map_alpha.size(); i++) 
+      if( map_alpha[i] >= 0 ) n_alpha++; 
+    int n_beta(0);
+    for(int i=0; i<map_beta.size(); i++) 
+      if( map_beta[i] >= 0 ) n_beta++; 
+
+    StaticSHMSPMatrix KElefta({n_alpha, nkev},
+                        shm_buffer_allocator->template get_allocator<SPComplexType>());
+    StaticSHMSPMatrix KErightb({n_beta, nkev},
+                        shm_buffer_allocator->template get_allocator<SPComplexType>());    
+
+
+    { // calculate Beta KE arrays
+      int orb_spin_indx = (OrbMats.size() == 2) ? 1 : 0;
+      int wlk_spin_indx = (walker_type == CLOSED) ? 0 : 1;
+      int other_spin = (walker_type == CLOSED) ? 0 : 0;
+      confg.resize(NAEB);
+      auto Gdims     = dm_dims(false, Beta);
+      auto Gdims_ref = dm_dims_ref(false, Beta);
+      auto SM_ptr(wset[iw].SlaterMatrix(SpinTypes(wlk_spin_indx)));
+
+      StaticMatrix G2D_({Gdims_ref.first, Gdims_ref.second},
+                          buffer_allocator->template get_allocator<ComplexType>());
+      int nr = Gdims.first * Gdims.second, nc = n_beta;
+      if (transposed_G_for_E_)
+        std::swap(nr, nc);
+      StaticSHMMatrix G({nr, nc},
+                      shm_buffer_allocator->template get_allocator<ComplexType>());
+      StaticMatrix eloc({n_beta, 3}, 
+                        buffer_allocator->template get_allocator<ComplexType>());
+
+      for (int nd = 0; nd < n_beta; ++nd)
+      { 
+        // keeping this simple for now!
+        if (nd % TG.TG_local().size() == TG.TG_local().rank())
+        { 
+          abij.get_configuration(1, invmap_beta[nd], confg);
+          ComplexType ov =  
+              SDetOp.MixedDensityMatrixFromConfiguration(OrbMats[orb_spin_indx],*SM_ptr,
+                                        G2D_, LogOverlapFactor, confg.data(), true);
+          if (transposed_G_for_E_)
+          { 
+            boost::multi::array_ref<ComplexType, 3> G3D(make_device_ptr(G.origin()), {n_beta, Gdims.first, Gdims.second});
+            fill_n(G[nd].origin(), Gdims.first * Gdims.second, ComplexType(0.0));
+            for (int k = 0; k < confg.size(); ++k)
+              G3D[nd][confg[k]] = G2D_[k];
+          }
+          else
+          { 
+            boost::multi::array_ref<ComplexType, 3> G3D(make_device_ptr(G.origin()), {Gdims.first, Gdims.second, n_beta}); 
+            for (int k = 0; k < Gdims.first; ++k)
+              for (int j = 0; j < Gdims.second; ++j)
+                G3D[k][j][nd] = ComplexType(0.0);
+            for (int k = 0; k < confg.size(); ++k) 
+              G3D[confg[k]]({0, Gdims.second}, nd) = G2D_[k];
+          }
+        }
+      }
+      TG.TG_local().barrier();
+
+      // c. evaluate energies and accumulate
+      HamOp.energy(eloc, G, orb_spin_indx, dummyMatPtr, 
+                                           std::addressof(KErightb), false, true, false);
+    }
+
+    // replace this by a loop over alpha configurations, and contract over nkev with a mav-vec
+    { // calculate Alpha KE arrays
+      int orb_spin_indx = 0; 
+      int wlk_spin_indx = 0; 
+      int other_spin = (walker_type == CLOSED) ? 0 : 1;
+      confg.resize(NAEA);
+      auto Gdims     = dm_dims(false, Alpha);
+      auto Gdims_ref = dm_dims_ref(false, Alpha);
+      auto SM_ptr(wset[iw].SlaterMatrix(SpinTypes(wlk_spin_indx)));
+
+      StaticMatrix G2D_({Gdims_ref.first, Gdims_ref.second},
+                          buffer_allocator->template get_allocator<ComplexType>());
+      int nr = Gdims.first * Gdims.second, nc = n_alpha;
+      if (transposed_G_for_E_)
+        std::swap(nr, nc);
+      StaticSHMMatrix G({nr, nc},
+                      shm_buffer_allocator->template get_allocator<ComplexType>());
+      StaticMatrix eloc({n_alpha, 3}, 
+                        buffer_allocator->template get_allocator<ComplexType>());
+
+      for (int nd = 0; nd < n_alpha; ++nd)
+      { 
+        // keeping this simple for now!
+        if (nd % TG.TG_local().size() == TG.TG_local().rank())
+        { 
+          abij.get_configuration(1, invmap_alpha[nd], confg);
+          ComplexType ov =  
+              SDetOp.MixedDensityMatrixFromConfiguration(OrbMats[orb_spin_indx],*SM_ptr,
+                                        G2D_, LogOverlapFactor, confg.data(), true);
+          if (transposed_G_for_E_)
+          { 
+            boost::multi::array_ref<ComplexType, 3> G3D(make_device_ptr(G.origin()), {n_alpha, Gdims.first, Gdims.second});
+            fill_n(G[nd].origin(), Gdims.first * Gdims.second, ComplexType(0.0));
+            for (int k = 0; k < confg.size(); ++k)
+              G3D[nd][confg[k]] = G2D_[k];
+          }
+          else
+          { 
+            boost::multi::array_ref<ComplexType, 3> G3D(make_device_ptr(G.origin()), {Gdims.first, Gdims.second, n_alpha}); 
+            for (int k = 0; k < Gdims.first; ++k)
+              for (int j = 0; j < Gdims.second; ++j)
+                G3D[k][j][nd] = ComplexType(0.0);
+            for (int k = 0; k < confg.size(); ++k) 
+              G3D[confg[k]]({0, Gdims.second}, nd) = G2D_[k];
+          }
+        }
+      }
+      TG.TG_local().barrier();
+
+      // c. evaluate energies and accumulate
+      HamOp.energy(eloc, G, orb_spin_indx, std::addressof(KElefta), 
+                                           dummyMatPtr, false, true, false);
+    }
+
+    // contract energy 
+    ComplexType Et(0.0);
+    for(int i=0; i<nsamples; i++) {
+      if (i % TG.TG_local().size() == TG.TG_local().rank())
+      { 
+        long a = selected_det_id[i]/long(n_unique_dets[1]);
+        long b = selected_det_id[i]%long(n_unique_dets[1]);        
+        Et += ComplexType(selected_wgt[i]) * ma::dot(KElefta[map_alpha[a]], 
+                                                     KErightb[map_beta[b]]); 
+      }
+    }
+    TG.TG_local().all_reduce_in_place_n(&Et,1,std::plus<>()); 
+    E[iw][2] += ComplexType(4.0)*Et;  
+  }
+
+  // remove scaling from CLOSED shell energy evaluation
+  ma::scal(ComplexType(0.5),E({0,nwalk},0));
+  ma::scal(ComplexType(0.5),E({0,nwalk},1));
+  ma::scal(ComplexType(0.25),E({0,nwalk},2));
+
+  TG.local_barrier();
+}
+
+/*
+   * Calculates the local energy and overlaps of all the walkers in the set and 
+   * returns them in the appropriate data structures
    */
 template<class WlkSet, class Mat, class TVec>
 void PHMSD::Energy_distributed(const WlkSet& wset, Mat&& E, TVec&& Ov)
@@ -300,8 +735,8 @@ void PHMSD::Energy_distributed(const WlkSet& wset, Mat&& E, TVec&& Ov)
    * G is assumed to be in shared memory
    * Ov is assumed to be local to the core
    */
-template<class WlkSet, class MatG, class TVec>
-void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool compact, bool transpose)
+template<class WlkSet, class MatG, class TVec, class MatOv>
+void PHMSD::MixedDensityMatrix_impl(const WlkSet& wset, MatG&& G, TVec&& Ov, MatOv&& Ovlps, bool compact, bool transpose)
 {
   // if not compact, calculate compact on temporary storage and multiply by OrbMat[] on the left at the end.
   using ma::T;
@@ -315,12 +750,24 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
   auto refc    = abij.reference_configuration();
   double LogOverlapFactor(wset.getLogOverlapFactor());
   assert(Ov.size() >= nw);
+  assert(Ovlps.size(0) == nw);
+  assert(Ovlps.size(1) == 2);
+  assert(Ovlps.size(2) == maxn_unique_confg);
   std::fill_n(Ov.begin(), nw, 0);
   for (int i = 0; i < G.size(0); i++)
     if (i % TG.TG_local().size() == TG.TG_local().rank())
       std::fill_n(G[i].origin(), G.size(1), ComplexType(0.0));
   TG.local_barrier();
-  auto Gsize = size_t(dm_size(not compact));
+
+  StaticMatrix Qwork({2 * max_exct_n, max_exct_n},
+                        buffer_allocator->template get_allocator<ComplexType>());
+  StaticMatrix Gwork({NAEA, maxnactive},
+                        buffer_allocator->template get_allocator<ComplexType>());
+  StaticMatrix local_QQ0inv0({OrbMats[0].size(0), NAEA},
+                            buffer_allocator->template get_allocator<ComplexType>());
+  StaticMatrix local_QQ0inv1({OrbMats.back().size(0), NAEB},
+                            buffer_allocator->template get_allocator<ComplexType>());
+
   if (walker_type != COLLINEAR)
   {
     APP_ABORT(" Error: Finish implementation of PHMSD::MixedDensityMatrix for CLOSED and NONCOLLINEAR. \n");
@@ -328,7 +775,6 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
   else
   {
     // always calculate compact and multiply by OrbMat at the end if full
-    auto Gsize_c     = size_t(dm_size(false));
     auto GAdims      = dm_dims(false, Alpha);
     auto GBdims      = dm_dims(false, Beta);
     auto GAdims_full = dm_dims(true, Alpha);
@@ -367,19 +813,20 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
     // each processor does ntasks_percore_serial overlaps serially
     const int w0 = TG.getLocalTGRank() * ntasks_percore;
     const int wN = (TG.getLocalTGRank() + 1) * ntasks_percore;
-
-    // task_w_d = = wlk_w*ndet + d
-    local_ov[0][0] = 1.0;
-    local_ov[1][0] = 1.0;
     for (int iw = w0; iw < wN; ++iw)
     {
+      auto&& local_ov(Ovlps[iw]);
+
+      local_ov[0][0] = 1.0;
+      local_ov[1][0] = 1.0;
       // 1. calculate list of overlaps
-      ComplexType ov0 = SDetOp.MixedDensityMatrixForWoodbury(OrbMats[0], *wset[iw].SlaterMatrix(Alpha), GA2D0_,
+      ComplexType ov0a = SDetOp.MixedDensityMatrixForWoodbury(OrbMats[0], *wset[iw].SlaterMatrix(Alpha), GA2D0_,
                                                              LogOverlapFactor, refc, local_QQ0inv0, true);
       calculate_overlaps(0, 1, 0, abij, local_QQ0inv0, Qwork, local_ov[0]);
-      ov0 *= SDetOp.MixedDensityMatrixForWoodbury(OrbMats.back(), *wset[iw].SlaterMatrix(Beta), GB2D0_,
+      ComplexType ov0b = SDetOp.MixedDensityMatrixForWoodbury(OrbMats.back(), *wset[iw].SlaterMatrix(Beta), GB2D0_,
                                                   LogOverlapFactor, refc + NAEA, local_QQ0inv1, true);
       calculate_overlaps(0, 1, 1, abij, local_QQ0inv1, Qwork, local_ov[1]);
+      ComplexType ov0 = ov0a * ov0b;  
       for (auto it = abij.configurations_begin(); it < abij.configurations_end(); ++it)
         Ov[iw] += ma::conj(std::get<2>(*it)) * ov0 * local_ov[0][std::get<0>(*it)] * local_ov[1][std::get<1>(*it)];
 
@@ -455,6 +902,9 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
           ma::copy(G1D, G({Gfulla.num_elements(), G.size(0)}, iw));
         }
       }
+      // scale by ov0s to return full overlaps
+      ma::scal(ov0a,local_ov[0]);  
+      ma::scal(ov0b,local_ov[1]);  
     }
     // all remaining overlaps are performed in parallel with blocks of cores
     // partition processors in nextra groups
@@ -510,15 +960,16 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
         int M0, Mn, sz = GAdims.second;
         std::tie(M0, Mn) = FairDivideBoundary(local_group_comm.rank(), sz, local_group_comm.size());
         int iw           = (last_task_index + ntasks_total_serial);
-        ComplexType ov0  = SDetOp.MixedDensityMatrixForWoodbury(OrbMats[0], *wset[iw].SlaterMatrix(Alpha), GA2D0_shm,
+        ComplexType ov0a  = SDetOp.MixedDensityMatrixForWoodbury(OrbMats[0], *wset[iw].SlaterMatrix(Alpha), GA2D0_shm,
                                                                LogOverlapFactor, refc, QQ0inv0, local_group_comm, true);
         calculate_overlaps(local_group_comm.rank(), local_group_comm.size(), 0, abij, QQ0inv0, Qwork,
                            unique_overlaps[0]);
         local_group_comm.barrier();
-        ov0 *= SDetOp.MixedDensityMatrixForWoodbury(OrbMats.back(), *wset[iw].SlaterMatrix(Beta), GB2D0_shm,
+        ComplexType ov0b = SDetOp.MixedDensityMatrixForWoodbury(OrbMats.back(), *wset[iw].SlaterMatrix(Beta), GB2D0_shm,
                                                     LogOverlapFactor, refc + NAEA, QQ0inv1, local_group_comm, true);
         calculate_overlaps(local_group_comm.rank(), local_group_comm.size(), 1, abij, QQ0inv1, Qwork,
                            unique_overlaps[1]);
+        ComplexType ov0 = ov0a * ov0b;
         local_group_comm.barrier();
         size_t ic = 0;
         for (auto it = abij.configurations_begin(); it < abij.configurations_end(); ++it, ++ic)
@@ -626,6 +1077,14 @@ void PHMSD::MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool com
                 Gw[k][m][iw] = Gfullb[k][m];
           }
         }
+        // scale overlaps
+        if (local_group_comm.rank() == 0) {
+          copy_n(make_device_ptr(unique_overlaps.origin()),unique_overlaps.size(),
+                 make_device_ptr(Ovlps[iw].origin()));  
+          ma::scal(ov0a,Ovlps[iw][0]);  
+          ma::scal(ov0b,Ovlps[iw][1]);  
+        }
+        local_group_comm.barrier();
       }
     }
   }
@@ -684,7 +1143,6 @@ void PHMSD::DensityMatrix_shared(const WlkSet& wset,
   fill_n(G.origin(), G.num_elements(), ComplexType(0.0));
   TG.local_barrier();
   double LogOverlapFactor(wset.getLogOverlapFactor());
-  auto Gsize = size_t(dm_size(not compact));
 
   if (walker_type != COLLINEAR)
   {
@@ -819,6 +1277,14 @@ void PHMSD::Overlap(const WlkSet& wset, TVec&& Ov)
   std::fill(Ov.begin(), Ov.begin() + nw, 0);
   auto refc = abij.reference_configuration();
   double LogOverlapFactor(wset.getLogOverlapFactor());
+  StaticMatrix Qwork({2 * max_exct_n, max_exct_n}, 
+                        buffer_allocator->template get_allocator<ComplexType>());
+  StaticMatrix local_ov({2, maxn_unique_confg},
+                            buffer_allocator->template get_allocator<ComplexType>());
+  StaticMatrix local_QQ0inv0({OrbMats[0].size(0), NAEA},
+                            buffer_allocator->template get_allocator<ComplexType>());
+  StaticMatrix local_QQ0inv1({OrbMats.back().size(0), NAEB},
+                            buffer_allocator->template get_allocator<ComplexType>());
   if (walker_type != COLLINEAR)
   {
     APP_ABORT(" Error: Finish implementation of PHMSD::MixedDensityMatrix for CLOSED and NONCOLLINEAR. \n");
@@ -1134,7 +1600,6 @@ void PHMSD::vMF(Vec&& v)
   using std::norm;
   assert(v.num_elements() == local_number_of_cholesky_vectors());
   std::fill_n(v.origin(), v.num_elements(), ComplexType(0));
-  auto Gsize = size_t(dm_size(false));
 
   //shmCMatrix ovlps({2,maxn_unique_confg},shared_allocator<ComplexType>{TG.Node()});
   //boost::multi::array<ComplexType,2> ovlps({2,maxn_unique_confg});

@@ -613,8 +613,9 @@ Wavefunction WavefunctionFactory::fromASCII(TaskGroup_& TGprop,
     shared_allocator<int> alloc_{TGwfn.Node()};
 
     // alpha
-    std::vector<int> counts_alpha(abij.number_of_unique_excitations()[0]);
-    std::vector<int> counts_beta(abij.number_of_unique_excitations()[1]);
+    auto n_unique(abij.number_of_unique_excitations());
+    std::vector<int> counts_alpha(n_unique[0]);
+    std::vector<int> counts_beta(n_unique[1]);
     if (TGwfn.Node().root())
     {
       for (auto it = abij.configurations_begin(); it < abij.configurations_end(); ++it)
@@ -625,6 +626,16 @@ Wavefunction WavefunctionFactory::fromASCII(TaskGroup_& TGprop,
     }
     TGwfn.Node().broadcast_n(counts_alpha.begin(), counts_alpha.size());
     TGwfn.Node().broadcast_n(counts_beta.begin(), counts_beta.size());
+    // PsiT_Matrix is the right type of sparse matrix needed, reusing type
+    using ucsr_mat_t = ma::sparse::ucsr_matrix<ComplexType, int, int, 
+                                    shared_allocator<ComplexType>, ma::sparse::is_root>;
+    std::vector<ucsr_mat_t> unsorted_det_coupling;
+    unsorted_det_coupling.reserve(2);
+    unsorted_det_coupling.emplace_back(ucsr_mat_t(tp_ul_ul{n_unique[0],n_unique[1]}, 
+                  tp_ul_ul{0, 0}, counts_alpha, shared_allocator<ComplexType>{TGwfn.Node()}));
+    unsorted_det_coupling.emplace_back(ucsr_mat_t(tp_ul_ul{n_unique[1],n_unique[0]}, 
+                  tp_ul_ul{0, 0}, counts_beta, shared_allocator<ComplexType>{TGwfn.Node()}));
+    // MAM: Will eventually get rid of beta_coupled_to_unique_alpha,alpha_coupled_to_unique_beta
     index_aos beta_coupled_to_unique_alpha(counts_alpha.size(), counts_alpha, alloc_);
     index_aos alpha_coupled_to_unique_beta(counts_beta.size(), counts_beta, alloc_);
     if (TGwfn.Node().root())
@@ -632,16 +643,33 @@ Wavefunction WavefunctionFactory::fromASCII(TaskGroup_& TGprop,
       int ni = 0;
       for (auto it = abij.configurations_begin(); it < abij.configurations_end(); ++it, ++ni)
       {
+        // index_aos
         beta_coupled_to_unique_alpha.emplace_back(std::get<0>(*it), ni);
         alpha_coupled_to_unique_beta.emplace_back(std::get<1>(*it), ni);
+        // sparse matrix
+        unsorted_det_coupling[0].emplace(std::array<int, 2>{std::get<0>(*it),std::get<1>(*it)}, 
+                                         ma::conj(std::get<2>(*it)));
+        unsorted_det_coupling[1].emplace(std::array<int, 2>{std::get<1>(*it),std::get<0>(*it)}, 
+                                         ma::conj(std::get<2>(*it)));
       }
     }
     TGwfn.Node().barrier();
+    std::vector<PsiT_Matrix> det_coupling_matrix;
+    det_coupling_matrix.reserve(2);
+    det_coupling_matrix.emplace_back( unsorted_det_coupling[0] );
+    det_coupling_matrix.emplace_back( unsorted_det_coupling[1] );
+    TGwfn.Node().barrier();
+
+    app_log()<<" Number of unique determinants per spin channel: " 
+             <<n_unique[0] <<" " <<n_unique[1] <<std::endl;
 
     //return Wavefunction{};
-    return Wavefunction(PHMSD(AFinfo, cur, TGwfn, std::move(HOps), std::move(acta2mo), std::move(actb2mo),
-                              std::move(abij), std::move(beta_coupled_to_unique_alpha),
-                              std::move(alpha_coupled_to_unique_beta), std::move(PsiT), walker_type, NCE, targetNW));
+    return Wavefunction(PHMSD(AFinfo, cur, TGwfn, std::move(HOps), 
+                    std::move(acta2mo), std::move(actb2mo),
+                    std::move(abij), std::move(beta_coupled_to_unique_alpha),
+                    std::move(alpha_coupled_to_unique_beta), 
+                    std::move(det_coupling_matrix),
+                    std::move(PsiT), walker_type, NCE, targetNW));
   }
   else if (type == "generalmsd")
   {
@@ -1062,18 +1090,29 @@ Wavefunction WavefunctionFactory::fromHDF5(TaskGroup_& TGprop,
     shared_allocator<int> alloc_{TGwfn.Node()};
 
     // alpha
-    std::vector<int> counts_alpha(abij.number_of_unique_excitations()[0]);
-    std::vector<int> counts_beta(abij.number_of_unique_excitations()[1]);
+    auto n_unique(abij.number_of_unique_excitations());
+    std::vector<int> counts_alpha(n_unique[0]);
+    std::vector<int> counts_beta(n_unique[1]);
     if (TGwfn.Node().root())
-    {
+    { 
       for (auto it = abij.configurations_begin(); it < abij.configurations_end(); ++it)
-      {
+      { 
         ++counts_alpha[std::get<0>(*it)];
         ++counts_beta[std::get<1>(*it)];
       }
     }
     TGwfn.Node().broadcast_n(counts_alpha.begin(), counts_alpha.size());
     TGwfn.Node().broadcast_n(counts_beta.begin(), counts_beta.size());
+    // PsiT_Matrix is the right type of sparse matrix needed, reusing type
+    using ucsr_mat_t = ma::sparse::ucsr_matrix<ComplexType, int, int,
+                                    shared_allocator<ComplexType>, ma::sparse::is_root>;
+    std::vector<ucsr_mat_t> unsorted_det_coupling;
+    unsorted_det_coupling.reserve(2);
+    unsorted_det_coupling.emplace_back(ucsr_mat_t(tp_ul_ul{n_unique[0],n_unique[1]},
+                  tp_ul_ul{0, 0}, counts_alpha, shared_allocator<ComplexType>{TGwfn.Node()}));
+    unsorted_det_coupling.emplace_back(ucsr_mat_t(tp_ul_ul{n_unique[1],n_unique[0]},
+                  tp_ul_ul{0, 0}, counts_beta, shared_allocator<ComplexType>{TGwfn.Node()}));
+    // MAM: Will eventually get rid of beta_coupled_to_unique_alpha,alpha_coupled_to_unique_beta
     index_aos beta_coupled_to_unique_alpha(counts_alpha.size(), counts_alpha, alloc_);
     index_aos alpha_coupled_to_unique_beta(counts_beta.size(), counts_beta, alloc_);
     if (TGwfn.Node().root())
@@ -1081,15 +1120,32 @@ Wavefunction WavefunctionFactory::fromHDF5(TaskGroup_& TGprop,
       int ni = 0;
       for (auto it = abij.configurations_begin(); it < abij.configurations_end(); ++it, ++ni)
       {
+        // index_aos
         beta_coupled_to_unique_alpha.emplace_back(std::get<0>(*it), ni);
         alpha_coupled_to_unique_beta.emplace_back(std::get<1>(*it), ni);
+        // sparse matrix
+        unsorted_det_coupling[0].emplace(std::array<int, 2>{std::get<0>(*it),std::get<1>(*it)},
+                                         ma::conj(std::get<2>(*it)));
+        unsorted_det_coupling[1].emplace(std::array<int, 2>{std::get<1>(*it),std::get<0>(*it)},
+                                         ma::conj(std::get<2>(*it)));
       }
     }
     TGwfn.Node().barrier();
+    std::vector<PsiT_Matrix> det_coupling_matrix;
+    det_coupling_matrix.reserve(2);
+    det_coupling_matrix.emplace_back( unsorted_det_coupling[0] );
+    det_coupling_matrix.emplace_back( unsorted_det_coupling[1] );
+    TGwfn.Node().barrier();
 
-    return Wavefunction(PHMSD(AFinfo, cur, TGwfn, std::move(HOps), std::move(acta2mo), std::move(actb2mo),
-                              std::move(abij), std::move(beta_coupled_to_unique_alpha),
-                              std::move(alpha_coupled_to_unique_beta), std::move(PsiT), walker_type, NCE, targetNW));
+    app_log()<<" Number of unique determinants per spin channel: " 
+             <<n_unique[0] <<" " <<n_unique[1] <<std::endl;
+
+    return Wavefunction(PHMSD(AFinfo, cur, TGwfn, std::move(HOps), 
+                    std::move(acta2mo), std::move(actb2mo),
+                    std::move(abij), std::move(beta_coupled_to_unique_alpha),
+                    std::move(alpha_coupled_to_unique_beta), 
+                    std::move(det_coupling_matrix),
+                    std::move(PsiT), walker_type, NCE, targetNW));
     app_error() << " Error: Wavefunction type PHMSD not yet implemented. \n";
     APP_ABORT(" Error: Wavefunction type PHMSD not yet implemented. \n");
     return Wavefunction();

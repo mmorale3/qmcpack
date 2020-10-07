@@ -21,6 +21,7 @@
 #include <string>
 #include <iostream>
 #include <tuple>
+#include<random>
 
 #include "AFQMC/Utilities/readWfn.h"
 #include "AFQMC/config.h"
@@ -77,6 +78,9 @@ class PHMSD : public AFQMCInfo
 
   using buffer_alloc_type     = device_buffer_type<ComplexType>;
   using shm_buffer_alloc_type = localTG_buffer_type<ComplexType>;
+  using shm_Ibuffer_alloc_type = localTG_buffer_type<int>;
+  using shm_Lbuffer_alloc_type = localTG_buffer_type<long>;
+  using shm_SPbuffer_alloc_type = localTG_buffer_type<SPComplexType>;
 
   using CVector       = boost::multi::array<ComplexType, 1, Allocator>;
   using CMatrix       = boost::multi::array<ComplexType, 2, Allocator>;
@@ -106,10 +110,18 @@ class PHMSD : public AFQMCInfo
   using StaticMatrix  = boost::multi::static_array<ComplexType, 2, buffer_alloc_type>;
   using Static3Tensor = boost::multi::static_array<ComplexType, 3, buffer_alloc_type>;
 
+  using StaticSHMIVector = boost::multi::static_array<int, 1, shm_Ibuffer_alloc_type>;
+  using StaticSHMLVector = boost::multi::static_array<long, 1, shm_Lbuffer_alloc_type>;
   using StaticSHMVector = boost::multi::static_array<ComplexType, 1, shm_buffer_alloc_type>;
   using StaticSHMMatrix = boost::multi::static_array<ComplexType, 2, shm_buffer_alloc_type>;
+  using StaticSHM3Tensor = boost::multi::static_array<ComplexType, 3, shm_buffer_alloc_type>;
+  using StaticSHM4Tensor = boost::multi::static_array<ComplexType, 4, shm_buffer_alloc_type>;
+
+  using StaticSHMSPMatrix = boost::multi::static_array<SPComplexType, 2, shm_SPbuffer_alloc_type>;
+  using StaticSHM3SPTensor = boost::multi::static_array<SPComplexType, 3, shm_SPbuffer_alloc_type>;
 
 public:
+  template<class csrMat>
   PHMSD(AFQMCInfo& info,
         xmlNodePtr cur,
         afqmc::TaskGroup_& tg_,
@@ -119,6 +131,7 @@ public:
         ph_excitations<int, ComplexType>&& abij_,
         index_aos&& beta_coupled_to_unique_alpha__,
         index_aos&& alpha_coupled_to_unique_beta__,
+        std::vector<csrMat>&& op_spin_det_coupling_,
         std::vector<PsiT_Matrix>&& orbs_,
         WALKER_TYPES wlk,
         ValueType nce,
@@ -133,6 +146,7 @@ public:
         acta2mo(std::move(acta2mo_)),
         actb2mo(std::move(actb2mo_)),
         abij(std::move(abij_)),
+        OpSpinDetCouplings(std::move(op_spin_det_coupling_)),
         OrbMats(std::move(orbs_)),
         RefOrbMats({0, 0}, shared_allocator<ComplexType>{TG.Node()}),
         number_of_references(-1),
@@ -147,26 +161,14 @@ public:
         maxn_unique_confg(std::max(abij.number_of_unique_excitations()[0], abij.number_of_unique_excitations()[1])),
         maxnactive(std::max(OrbMats[0].size(0), OrbMats.back().size(0))),
         max_exct_n(std::max(abij.maximum_excitation_number()[0], abij.maximum_excitation_number()[1])),
+        n_unique_dets(abij.number_of_unique_excitations()),
         unique_overlaps({2, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
         unique_Etot({2, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
         QQ0inv0({1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
         QQ0inv1({1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
         GA2D0_shm({1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
         GB2D0_shm({1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
-        local_ov({2, maxn_unique_confg}),
-        local_etot({2, maxn_unique_confg}),
-        local_QQ0inv0({OrbMats[0].size(0), NAEA}),
-        local_QQ0inv1({OrbMats.back().size(0), NAEB}),
-        Qwork({2 * max_exct_n, max_exct_n}),
-        Gwork({NAEA, maxnactive}),
-        Ovmsd({1, 1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
-        Emsd({1, 1, 1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
-        QQ0A({1, 1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
-        QQ0B({1, 1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
-        GrefA({1, 1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
-        GrefB({1, 1, 1}, shared_allocator<ComplexType>{TG.TG_local()}),
-        KEright({1, 1, 1}, shared_allocator<SPComplexType>{TG.TG_local()}),
-        KEleft({1, 1}, shared_allocator<SPComplexType>{TG.TG_local()}),
+        distribution(0.0,1.0),
         det_couplings{std::move(beta_coupled_to_unique_alpha__), std::move(alpha_coupled_to_unique_beta__)},
         req_Gsend(MPI_REQUEST_NULL),
         req_Grecv(MPI_REQUEST_NULL),
@@ -194,11 +196,24 @@ public:
     m_param.add(number_of_references, "number_of_references", "int");
     m_param.add(number_of_references, "nrefs", "int");
     m_param.add(excited_file, "excited", "std::string");
+    m_param.add(nsamples_base, "nsamples_base", "int");
+    m_param.add(nsamples_same, "nsamples_same_spin", "int");
+    m_param.add(nsamples_opp, "nsamples_opp_spin", "int");
     // generalize this to multi-particle excitations, how do I read a list of integers???
     m_param.add(i_, "i", "int");
     m_param.add(a_, "a", "int");
     m_param.put(cur);
 
+    // sample the energy???
+    sample_energy = ((nsamples_same>0) || (nsamples_opp>0) ); 
+    if(sample_energy) { 
+      app_log()<<" Using local energy evaluation with sampling of determinants. \n";
+      if(nsamples_base > 0 && (nsamples_base > n_unique_dets[0] || nsamples_base > n_unique_dets[1])) 
+        APP_ABORT("Error: nsamples_base is too large. \n\n\n");  
+      if(nsamples_same>0) app_log()<<"    # samples same spin: " <<nsamples_same <<"\n"; 
+      if(nsamples_opp>0) app_log()<<"    # samples opposite spin: " <<nsamples_opp <<"\n"; 
+      if(nsamples_base>0) app_log()<<"    # deterministic samples: " <<nsamples_base <<"\n"; 
+    }   
     if (excited_file != "" && i_ >= 0 && a_ >= 0)
     {
       if (i_ < NMO && a_ < NMO)
@@ -345,8 +360,12 @@ public:
   {
     if (TG.getNGroupsPerTG() > 1)
       Energy_distributed(wset, std::forward<Mat>(E), std::forward<TVec>(Ov));
-    else
-      Energy_shared(wset, std::forward<Mat>(E), std::forward<TVec>(Ov));
+    else {
+      if(sample_energy)
+        Energy_sampled_shared(wset, std::forward<Mat>(E), std::forward<TVec>(Ov));
+      else 
+        Energy_shared(wset, std::forward<Mat>(E), std::forward<TVec>(Ov));
+    }
   }
 
   /*
@@ -366,7 +385,13 @@ public:
   }
 
   template<class WlkSet, class MatG, class TVec>
-  void MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool compact = true, bool transpose = false);
+  void MixedDensityMatrix(const WlkSet& wset, MatG&& G, TVec&& Ov, bool compact = true, bool transpose = false)
+  {
+    int nw = wset.size();
+    StaticSHM3Tensor local_ov({nw, 2, maxn_unique_confg},
+                            shm_buffer_allocator->template get_allocator<ComplexType>()); 
+    MixedDensityMatrix_impl(wset,G,Ov,local_ov,compact,transpose);
+  }
 
   /*
      * Calculates the density matrix with respect to a given Reference
@@ -570,6 +595,9 @@ protected:
 
   ph_excitations<int, ComplexType> abij;
 
+  // sparse matrix with opposite spin determinant couplings
+  std::vector<devcsr_Matrix> OpSpinDetCouplings;  
+
   // eventually switched from CMatrix to SMHSparseMatrix(node)
   std::vector<PsiT_Matrix> OrbMats;
   mpi3CMatrix RefOrbMats;
@@ -605,36 +633,24 @@ protected:
   size_t maxn_unique_confg; // maximum number of unque configurations
   size_t maxnactive;        // maximum number of states in active space
   size_t max_exct_n;        // maximum excitation number (number of electrons excited simultaneously)
-  // used by OVerlap and MixedDensityMatrix
+  std::array<size_t, 2> n_unique_dets;
+
+  // used when nextra > 0, leaving in local buffers since allocators need custom communicator
+  // not known in advance 
   shmCMatrix unique_overlaps;
   shmCMatrix unique_Etot;
   shmCMatrix QQ0inv0; // Q * inv(Q0)
   shmCMatrix QQ0inv1; // Q * inv(Q0)
   shmCMatrix GA2D0_shm;
   shmCMatrix GB2D0_shm;
-  boost::multi::array<ComplexType, 2> local_ov;
-  boost::multi::array<ComplexType, 2> local_etot;
-  boost::multi::array<ComplexType, 2> local_QQ0inv0;
-  boost::multi::array<ComplexType, 2> local_QQ0inv1;
-  boost::multi::array<ComplexType, 2> Qwork;
-  boost::multi::array<ComplexType, 2> Gwork;
-  // used by Energy_shared
-  boost::multi::array<ComplexType, 1> wgt;
-  boost::multi::array<ComplexType, 1> opSpinEJ;
-  shmC3Tensor Ovmsd; // [nspins][maxn_unique_confg][nwalk]
-  shmC4Tensor Emsd;  // [nspins][maxn_unique_confg][nwalk][3]
-  shmC3Tensor QQ0A;  // [nwalk][NAOA][NAEA]
-  shmC3Tensor QQ0B;  // [nwalk][NAOB][NAEB]
-  shmC3Tensor GrefA; // [nwalk][NAOA][NMO]
-  shmC3Tensor GrefB; // [nwalk][NAOB][NMO]
-  shmSPC3Tensor KEright;
-  shmSPCMatrix KEleft;
 
   // variables for energy sampling
   bool sample_energy = false;
-  int nsamplesEX = 0;
-  int nsamplesEJ = 0;
-  int nsamplesE1 = 0;
+  int nsamples_base = 20;
+  int nsamples_same = 0;
+  int nsamples_opp = 0;
+  std::default_random_engine generator;
+  std::uniform_real_distribution<double> distribution;
 
   // array of sequence structure storing the list of connected alpha/beta configurations
   std::array<index_aos, 2> det_couplings;
@@ -703,6 +719,14 @@ protected:
                             double LogOverlapFactor,
                             bool herm,
                             bool compact);
+
+  template<class WlkSet, class MatG, class TVec, class MatOv>
+  void MixedDensityMatrix_impl(const WlkSet& wset, 
+                          MatG&& G, 
+                          TVec&& Ov, 
+                          MatOv&& ovlps,
+                          bool compact = true, 
+                          bool transpose = false); 
 
   /*
     template<class MatA, class MatB, class MatG, class TVec>
