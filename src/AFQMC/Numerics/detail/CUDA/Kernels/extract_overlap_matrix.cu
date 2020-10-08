@@ -8,13 +8,14 @@
 
 namespace kernels
 {
+// extract overlap matrix (M) for PHMSD
 // M[i][p][q] = T[iexcit[i][p+nex]][iexcit[i][q]]
-__global__ void kernel_irregular_fill(int ndet,
-                                      int nex,
-                                      int nmo,
-                                      int const* iexcit,
-                                      thrust::complex<double> const* T,
-                                      thrust::complex<double>* M)
+__global__ void kernel_extract_overlap_matrix(int ndet,
+                                              int nex,
+                                              int nmo,
+                                              int const* iexcit,
+                                              thrust::complex<double> const* T,
+                                              thrust::complex<double>* M)
 {
   int x = blockIdx.x*blockDim.x + threadIdx.x;
   int y = blockIdx.y*blockDim.y + threadIdx.y;
@@ -28,19 +29,19 @@ __global__ void kernel_irregular_fill(int ndet,
   M[x*nex*nex + y*nex + z] = T[ip*nmo + iq];
 }
 
-void irregular_fill(int ndet,
-                    int nex,
-                    int nmo,
-                    int const* iexcit,
-                    std::complex<double> const* T,
-                    std::complex<double> *M)
+void extract_overlap_matrix(int ndet,
+                            int nex,
+                            int nmo,
+                            int const* iexcit,
+                            std::complex<double> const* T,
+                            std::complex<double> *M)
 {
   int xblock_dim = 8;
   int grid_dim_y = (nex + xblock_dim - 1) / xblock_dim;
   int grid_dim_x = (ndet + xblock_dim - 1) / xblock_dim;
   dim3 grid_dim(grid_dim_x, grid_dim_y, nex);
   dim3 block_dim(xblock_dim,xblock_dim,xblock_dim);
-  kernel_irregular_fill<<<grid_dim, block_dim>>>(ndet, nex, nmo, iexcit,
+  kernel_extract_overlap_matrix<<<grid_dim, block_dim>>>(ndet, nex, nmo, iexcit,
                                                  reinterpret_cast<thrust::complex<double> const*>(T),
                                                  reinterpret_cast<thrust::complex<double>*>(M));
   qmc_cuda::cuda_check(cudaGetLastError());

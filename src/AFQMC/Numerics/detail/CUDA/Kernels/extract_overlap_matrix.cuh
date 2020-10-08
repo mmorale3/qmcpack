@@ -1,12 +1,12 @@
-#ifndef AFQMC_IRREGULAR_FILL_HPP
-#define AFQMC_IRREGULAR_FILL_HPP
+#ifndef AFQMC_EXTRACT_OVERLAP_MATRIX
+#define AFQMC_EXTRACT_OVERLAP_MATRIX
 
 #include <complex>
 
 namespace kernels
 {
 
-void irregular_fill(int ndet,
+void extract_overlap_matrix(int ndet,
                     int nex,
                     int nmo,
                     int const* iexcit,

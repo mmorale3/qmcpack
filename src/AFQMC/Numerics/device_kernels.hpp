@@ -50,7 +50,8 @@
 #include "AFQMC/Numerics/detail/CUDA/Kernels/Auwn_Bun_Cuw.cuh"
 #include "AFQMC/Numerics/detail/CUDA/Kernels/inplace_product.cuh"
 #include "AFQMC/Numerics/detail/CUDA/Kernels/get_diagonal.cuh"
-#include "AFQMC/Numerics/detail/CUDA/Kernels/irregular_fill.cuh"
+#include "AFQMC/Numerics/detail/CUDA/Kernels/extract_overlap_matrix.cuh"
+#include "AFQMC/Numerics/detail/CUDA/Kernels/construct_phmsd_R.cuh"
 
 #elif defined(ENABLE_HIP)
 

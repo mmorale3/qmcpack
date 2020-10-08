@@ -61,7 +61,8 @@ IF(ENABLE_CUDA)
     Numerics/detail/CUDA/Kernels/Auwn_Bun_Cuw.cu
     Numerics/detail/CUDA/Kernels/inplace_product.cu
     Numerics/detail/CUDA/Kernels/get_diagonal.cu
-    Numerics/detail/CUDA/Kernels/irregular_fill.cu
+    Numerics/detail/CUDA/Kernels/extract_overlap_matrix.cu
+    Numerics/detail/CUDA/Kernels/construct_phmsd_R.cu
   )
 ELSEIF(ENABLE_HIP)
   SET(AFQMC_HIP_SRCS

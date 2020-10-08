@@ -23,6 +23,10 @@
 
 #include <vector>
 
+#include "multi/array.hpp"
+#include "multi/array_ref.hpp"
+
+#include "Utilities/Timer.h"
 
 #include "AFQMC/config.h"
 #include "AFQMC/config.0.h"
@@ -37,8 +41,7 @@
 #include "AFQMC/Numerics/device_kernels.hpp"
 #endif
 
-#include "multi/array.hpp"
-#include "multi/array_ref.hpp"
+#include "AFQMC/Utilities/test_utils.hpp"
 
 
 using boost::multi::array;
@@ -132,6 +135,125 @@ TEST_CASE("batchedDot", "[Numerics][misc_kernels]")
   std::complex<double> ref_val(-1.2, -1.0);
   Tensor1D<std::complex<double>> ref(iextensions<1U>{dim}, ref_val, alloc);
   verify_approx(ref, y);
+}
+
+
+TEST_CASE("extract_overlap_matrix", "[Numerics][misc_kernels]")
+{
+  Alloc<ComplexType> alloc{};
+  Alloc<int> ialloc{};
+  int ndet = 1000;
+  int nex = 5;
+  int nmo = 100;
+  Tensor3D<ComplexType> M({ndet, nex, nex}, ComplexType(0.0), alloc);
+  Tensor2D<ComplexType> T({nmo, nmo}, ComplexType(0.0), alloc);
+  boost::multi::array<ComplexType, 3> M_({ndet, nex, nex}, ComplexType(0.0));
+  boost::multi::array<ComplexType, 2> T_({nmo, nmo}, ComplexType(0.0));
+  Tensor1D<int> excit(iextensions<1u>{ndet*2*nex}, 0, alloc);
+  std::vector<int> tmpi(ndet*2*nex);
+  {
+    std::vector<ComplexType> tmp(nmo*nmo);
+    fillRandomMatrix(tmp);
+    copy_n(tmp.data(), tmp.size(), T.origin());
+    copy_n(tmp.data(), tmp.size(), T_.origin());
+    fillRandomMatrix(tmpi, nmo);
+    copy_n(tmpi.data(), tmpi.size(), excit.origin());
+  }
+  Timer timer;
+  for (int i = 0; i < ndet; i++)
+    for (int j = 0; j < nex; j++)
+      for (int k = 0; k < nex; k++)
+      {
+        M_[i][j][k] = T_[tmpi[i*2*nex+j+nex]][tmpi[i*2*nex+k]];
+      }
+  std::cout << " Tcpu fill: " << timer.elapsed() << std::endl;
+  using kernels::extract_overlap_matrix;
+  timer.restart();
+  extract_overlap_matrix(ndet, nex, nmo, to_address(excit.origin()), to_address(T.origin()), to_address(M.origin()));
+  std::cout << " Tgpu fill: " << timer.elapsed() << std::endl;
+  {
+    boost::multi::array<ComplexType, 3> tmp({ndet,nex,nex}, 0.0);
+    copy_n(M.data(), M.num_elements(), tmp.origin());
+    for (int i = 0; i < tmp.num_elements(); i++) {
+      REQUIRE(std::real(*(tmp.data()+i)) == Approx(std::real(*(M_.data()+i))));
+    }
+  }
+}
+
+TEST_CASE("construct_phmsd_R", "[Numerics][misc_kernels]")
+{
+  Alloc<ComplexType> alloc{};
+  Alloc<int> ialloc{};
+  int ndet = 5000;
+  int nex = 7;
+  int nmo = 50;
+  int nelec = 15;
+  int nact = 7;
+  //// add term coming from identity
+  boost::multi::array<ComplexType, 2> T_({nmo, nmo}, ComplexType(0.0));
+  boost::multi::array<ComplexType, 3> I_({ndet, nex, nex}, ComplexType(0.0));
+  boost::multi::array<ComplexType, 3> R_({ndet, nact, nelec}, ComplexType(0.0));
+  boost::multi::array<ComplexType, 1> weights_(iextensions<1u>{ndet}, ComplexType(7.0));
+  Tensor2D<ComplexType> T({nmo, nmo}, ComplexType(0.0), alloc);
+  Tensor3D<ComplexType> I({ndet, nex, nex}, ComplexType(0.0), alloc);
+  Tensor3D<ComplexType> Rbuff({ndet, nact, nelec}, ComplexType(0.0), alloc);
+  Tensor2D<ComplexType> R({nact, nelec}, ComplexType(0.0), alloc);
+  Tensor1D<ComplexType> weights(iextensions<1u>{ndet}, ComplexType(7.0), alloc);
+  Tensor1D<int> iexcit(iextensions<1u>{ndet}, 7, ialloc);
+  Tensor1D<int> orbs(iextensions<1u>{ndet}, 7, ialloc);
+  {
+    std::vector<ComplexType> tmp(ndet*nmo*nmo);
+    fillRandomMatrix(tmp);
+    copy_n(tmp.data(), T_.num_elements(), T_.origin());
+    copy_n(tmp.data(), I_.num_elements(), I_.origin());
+    copy_n(tmp.data(), T.num_elements(), T.origin());
+    copy_n(tmp.data(), I.num_elements(), I.origin());
+  }
+  Timer timer;
+  for (int nd = 0; nd < ndet; nd++) {
+    for (int i = 0; i < nelec; ++i)
+      R_[nd][i][i] += weights_[nd];
+    for (int p = 0; p < nex; ++p)
+    {
+      auto Rp = R_[nd][p];
+      auto Ip = I_[nd][p];
+      for (int q = 0; q < nex; ++q)
+      {
+        auto Ipq = Ip[q];
+        auto Tq  = T_[q];
+        //if (nd == 0) std::cout << p << " " << q << " " <<  Rp[0] << " " << Ipq << " " << Tq[0] << std::endl;
+        for (int i = 0; i < nelec; ++i) {
+          Rp[i] -= weights_[nd] * Ipq * Tq[i];
+          //if (nd == 0) std::cout << i << " " << p << " " << q << " " <<  Rp[i] << " " << weights[nd]*Ipq*Tq[i] << std::endl;
+        }
+        //if (nd == 0)
+          //std::cout << p << "  " << q << " " << weights_[nd] << " " << Ipq << std::endl;
+        Rp[q] += weights_[nd] * Ipq;
+      }
+    }
+  }
+  std::cout << " Tcpu fill: " << timer.elapsed() << std::endl;
+  using kernels::construct_phmsd_R;
+  timer.restart();
+  construct_phmsd_R(ndet, nex, nact, nelec, nmo,
+                    to_address(iexcit.origin()), to_address(orbs.origin()),
+                    to_address(weights.origin()), to_address(T.origin()),
+                    to_address(I.origin()), to_address(Rbuff.origin()),
+                    to_address(R.origin()));
+  std::cout << " Tgpu fill: " << timer.elapsed() << std::endl;
+  {
+    boost::multi::array<ComplexType, 3> tmp({ndet,nact,nelec}, 0.0);
+    copy_n(Rbuff.data(), Rbuff.num_elements(), tmp.origin());
+    for (int idet = 0; idet < ndet; idet++) {
+      for (int iv = 0; iv < nact; iv++) {
+        for (int iel = 0; iel < nelec; iel++) {
+          int i = idet * nact * nelec + iv * nelec + iel;
+          //std::cout << idet << " " << iv << " " << iel << " " << std::real(*(tmp.data()+i)) << " " << std::real(*(R_.data()+i)) << std::endl;
+          REQUIRE(std::real(*(tmp.data()+i)) == Approx(std::real(*(R_.data()+i))));
+        }
+      }
+    }
+  }
 }
 
 #endif
