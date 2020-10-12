@@ -317,6 +317,37 @@ void calculate_ph_energies_v1(int spin,
 */
 }
 
+#if defined(ENABLE_CUDA) || defined(ENABLE_HIP)
+template<class Array1D, class MatA, class MatB, class PH_EXCT>
+inline void calculate_overlaps(int rank, int ngrp, int spin, PH_EXCT const& abij, MatA&& T, MatB&& Qwork, Array1D&& ov)
+{
+  using kernels::extract_overlap_matrix;
+  using kernels::construct_phmsd_R;
+  using kernels::reduce_phmsd_R;
+  using ma::getrfBatched;
+  using ma::getriBatched;
+  using ma::batched_determinant_from_getrf;
+  std::vector<pointer> O_array, Oinv_array;
+  for (int nex = 1, nd = 1; nex < abij.maximum_excitation_number()[spin]; nex++)
+  {
+    extract_overlap_matrix(ndet, nex, nmo, to_address(iexcit.origin()), to_address(T.origin()), to_address(Qwork.origin()));
+    for (int i = 0; idet < ndex; idet++) {
+      O_array.emplace_back(Qwork[i].origin());
+      Oinv_array.emplace_back(Qwork[i].origin());
+    }
+    getrfBatched(nex, ma::pointer_dispatch(O_array.data()), nex, ma::pointer_dispatch(spinv.data()),
+                 status, ma::pointer_dispatch(WORK.data()));
+    batched_determinant_from_getrf(nex, ma::pointer_dispatch(O_array.origin()), nex, ma::pointer_dispatch(spinv.data()),
+                                   spinv.size(1), log_factor, to_address(ovlps.origin()+offset, ndet);
+    getriBatched(nex, ma::pointer_dispatch(O_array.origin()), ma::pointer_dispatch(spinv.data()),
+                 ma::pointer_dispatch(Oinv_array().data()), nex, ma::pointer_dispatch(info.origin()), ndet);
+    construct_phmsd_R();
+    reduce_phmsd_R();
+
+  }
+}
+#endif
+
 
 } // namespace afqmc
 } // namespace qmcplusplus
