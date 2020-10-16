@@ -27,6 +27,7 @@
 #include "AFQMC/Numerics/ma_operations.hpp"
 #include "AFQMC/Memory/buffer_allocators.h"
 
+#include "Utilities/Timer.h"
 #include "AFQMC/Utilities/type_conversion.hpp"
 #include "AFQMC/Utilities/Utils.hpp"
 #include "AFQMC/Numerics/batched_operations.hpp"
@@ -455,6 +456,7 @@ public:
     // take from BufferManager.
     //      long default_buffer_size_in_MB(4L*1024L);
     long batch_size(0);
+    Timer timer;
     if (addEXX)
     {
       long Bytes = long(default_buffer_size_in_MB) * 1024L * 1024L;
@@ -504,12 +506,14 @@ public:
     Static4Tensor GKK({nspin, nkpts, nkpts, nwalk * nmo_max * nocc_max},
                       device_buffer_allocator->template get_allocator<SPComplexType>());
     GKaKjw_to_GKKwaj(G3Da, GKK[0], nelpk[nd].sliced(0, nkpts), dev_nelpk[nd], dev_a0pk[nd]);
+    std::cout << "GK : " << timer.elapsed() << std::endl; 
     if (walker_type == COLLINEAR)
       GKaKjw_to_GKKwaj(G3Db, GKK[1], nelpk[nd].sliced(nkpts, 2 * nkpts), dev_nelpk[nd].sliced(nkpts, 2 * nkpts),
                        dev_a0pk[nd].sliced(nkpts, 2 * nkpts));
     // one-body contribution
     // haj[ndet*nkpts][nocc*nmo]
     // not parallelized for now, since it would require customization of Wfn
+    timer.restart();
     if (addH1)
     {
       for (int n = 0; n < nwalk; n++)
@@ -552,10 +556,14 @@ public:
 #endif
       }
     }
+    std::cout << "H1 : " << timer.elapsed() << std::endl; 
 
     // move calculation of H1 here
     // NOTE: For CLOSED/NONCOLLINEAR, can do all walkers simultaneously to improve perf. of GEMM
     //       Not sure how to do it for COLLINEAR.
+    double tgemm = 0;
+    double ttab = 0;
+    double tdot = 0;
     if (addEXX)
     {
       int batch_cnt(0);
@@ -660,22 +668,28 @@ public:
 
               if (batch_cnt >= batch_size)
               {
+		timer.restart();
                 gemmBatched('T', 'N', nocc_max * nchol_max, nwalk * nocc_max, nmo_max, SPComplexType(1.0),
                             Aarray.data(), nmo_max, Barray.data(), nmo_max, SPComplexType(0.0), Carray.data(),
                             nocc_max * nchol_max, Aarray.size());
+		tgemm += timer.elapsed();
 
                 copy_n(scl_factors.data(), scl_factors.size(), dev_scl_factors.origin());
                 using ma::batched_dot_wabn_wban;
+		timer.restart();
                 batched_dot_wabn_wban(scl_factors.size(), nwalk, nocc_max, nchol_max, dev_scl_factors.origin(),
                                       T1.origin(), to_address(E[0].origin()) + 1, E.stride(0));
+		tdot += timer.elapsed();
 
                 if (addEJ)
                 {
                   int nc0 = Q2vbias[Q] / 2; //std::accumulate(ncholpQ.begin(),ncholpQ.begin()+Q,0);
                   copy_n(kdiag.data(), kdiag.size(), IMats.origin());
                   using ma::batched_Tab_to_Klr;
+	          timer.restart();
                   batched_Tab_to_Klr(kdiag.size(), nwalk, nocc_max, nchol_max, local_nCV, ncholpQ[Q], nc0,
                                      IMats.origin(), T1.origin(), Kl.origin(), Kr.origin());
+		  ttab += timer.elapsed();
                 }
 
                 // reset
@@ -691,27 +705,34 @@ public:
 
           if (batch_cnt > 0)
           {
+	    timer.restart();
             gemmBatched('T', 'N', nocc_max * nchol_max, nwalk * nocc_max, nmo_max, SPComplexType(1.0), Aarray.data(),
                         nmo_max, Barray.data(), nmo_max, SPComplexType(0.0), Carray.data(), nocc_max * nchol_max,
                         Aarray.size());
+	    tgemm += timer.elapsed();
 
             copy_n(scl_factors.data(), scl_factors.size(), dev_scl_factors.origin());
             using ma::batched_dot_wabn_wban;
+	    timer.restart();
             batched_dot_wabn_wban(scl_factors.size(), nwalk, nocc_max, nchol_max, dev_scl_factors.origin(), T1.origin(),
                                   to_address(E[0].origin()) + 1, E.stride(0));
+	    tdot += timer.elapsed();
 
             if (addEJ)
             {
               int nc0 = Q2vbias[Q] / 2; //std::accumulate(ncholpQ.begin(),ncholpQ.begin()+Q,0);
               copy_n(kdiag.data(), kdiag.size(), IMats.origin());
               using ma::batched_Tab_to_Klr;
+	      timer.restart();
               batched_Tab_to_Klr(kdiag.size(), nwalk, nocc_max, nchol_max, local_nCV, ncholpQ[Q], nc0, IMats.origin(),
                                  T1.origin(), Kl.origin(), Kr.origin());
+	      ttab += timer.elapsed();
             }
           }
         } // Q
       }   // COLLINEAR
     }
+    std::cout << tdot << " " << tgemm << " " << ttab << std::endl;
 
     if (addEJ)
     {
@@ -722,10 +743,12 @@ public:
       }
       RealType scl = (walker_type == CLOSED ? 2.0 : 1.0);
       using ma::adotpby;
+      timer.restart();
       for (int n = 0; n < nwalk; ++n)
       {
         adotpby(SPComplexType(0.5 * scl * scl), Kl[n], Kr[n], ComplexType(0.0), E[n].origin() + 2);
       }
+      std::cout << "tdotej: " << timer.elapsed() << std::endl;
       if (getKr)
         copy_n_cast(Kr.origin(), Kr.num_elements(), make_device_ptr(KEright->origin()));
       if (getKl)

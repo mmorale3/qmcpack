@@ -137,12 +137,10 @@ void wfn_fac(boost::mpi3::communicator& world)
     REQUIRE(okay);
     std::string restart_file = create_test_hdf(UTEST_WFN, UTEST_HAMIL);
     std::string wfn_xml      = "<Wavefunction name=\"wfn0\" info=\"info0\"> \
-      <parameter name=\"filetype\">ascii</parameter> \
+      <parameter name=\"filetype\">hdf5</parameter> \
       <parameter name=\"filename\">" +
         UTEST_WFN + "</parameter> \
       <parameter name=\"cutoff\">1e-6</parameter> \
-      <parameter name=\"restart_file\">" +
-        restart_file + "</parameter> \
   </Wavefunction> \
 ";
     const char* wfn_xml_block = wfn_xml.c_str();
