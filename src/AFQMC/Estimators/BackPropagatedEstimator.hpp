@@ -1,3 +1,14 @@
+//////////////////////////////////////////////////////////////////////////////////////
+// This file is distributed under the University of Illinois/NCSA Open Source License.
+// See LICENSE file in top directory for details.
+//
+// Copyright (c) 2016 Jeongnim Kim and QMCPACK developers.
+//
+// File developed by: Miguel Morales, moralessilva2@llnl.gov, Lawrence Livermore National Laboratory
+//
+// File created by: Miguel Morales, moralessilva2@llnl.gov, Lawrence Livermore National Laboratory
+//////////////////////////////////////////////////////////////////////////////////////
+
 #ifndef QMCPLUSPLUS_AFQMC_BACKPROPAGATEDESTIMATOR_HPP
 #define QMCPLUSPLUS_AFQMC_BACKPROPAGATEDESTIMATOR_HPP
 
@@ -300,10 +311,10 @@ public:
 private:
   TaskGroup_& TG;
 
-  WALKER_TYPES walker_type;
+  WALKER_TYPES walker_type = UNDEFINED_WALKER_TYPE;
 
-  bool writer;
-  bool accumulated_in_last_block;
+  bool writer = false;
+  bool accumulated_in_last_block = false;
 
   mpi3CTensor Refs;
 
@@ -313,27 +324,25 @@ private:
 
   Propagator& prop0;
 
-  int nrefs;
-  int max_nback_prop;
+  int nrefs = 0;
+  int max_nback_prop = 0;
   std::vector<int> nback_prop_steps;
 
-  RealType weight, weight_sub;
-  RealType targetW = 1;
   int iblock       = 0;
   int nblocks_skip = 0;
   ComplexType zero = ComplexType(0.0, 0.0);
   ComplexType one  = ComplexType(1.0, 0.0);
 
   // Frequency of reorthogonalisation.
-  int nStabilize;
+  int nStabilize = 1;
   // Block size over which RDM will be averaged.
-  int block_size;
+  int block_size = 1;
   // Whether to restore cosine projection and real local energy apprximation for weights
   // along back propagation path.
-  bool path_restoration, importanceSampling;
-  bool extra_path_restoration;
+  bool path_restoration = true, importanceSampling = true;
+  bool extra_path_restoration = true;
 
-  int first;
+  int first = true;
 
   bool write_metadata = true;
 };

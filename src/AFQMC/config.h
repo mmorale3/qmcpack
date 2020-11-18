@@ -43,6 +43,7 @@ enum AFQMCTimerIDs
   G_for_vbias_timer,
   propagate_timer,
   back_propagate_timer,
+  mixed_estimator_timer,
   E_comm_overhead_timer,
   vHS_comm_overhead_timer,
   popcont_timer,

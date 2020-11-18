@@ -110,7 +110,7 @@ public:
         NwIJ({0, 0, 0, 0}, shared_allocator<ComplexType>{TG.TG_local()}),
         NwI({0, 0, 0}, shared_allocator<ComplexType>{TG.TG_local()})
   {
-    app_log() << "  --  Adding Back Propagated atom-centered correlation functions (atomcentered_correlators). -- \n ";
+    app_log() << "  --  Adding atom-centered correlation functions (atomcentered_correlators). -- \n ";
     std::string orb_file("");
     std::string str("false");
 
@@ -225,14 +225,13 @@ public:
     fill_n(DMAverage2D.origin(), DMAverage2D.num_elements(), ComplexType(0.0, 0.0));
   }
 
-  template<class MatG, class MatG_host, class HostCVec1, class HostCVec2, class HostCVec3>
+  template<class MatG, class MatG_host, class HostCVec1, class HostCVec2>
   void accumulate_reference(int iav,
                             int iref,
                             MatG&& G,
                             MatG_host&& G_host,
                             HostCVec1&& wgt,
                             HostCVec2&& Xw,
-                            HostCVec3&& ovlp,
                             bool impsamp)
   {
     static_assert(std::decay<MatG>::type::dimensionality == 4, "Wrong dimensionality");
@@ -245,7 +244,6 @@ public:
     assert(G.size(0) == wgt.size(0));
     assert(wgt.size(0) == nw);
     assert(Xw.size(0) == nw);
-    assert(ovlp.size(0) >= nw);
     assert(G.num_elements() == G_host.num_elements());
     assert(G.extensions() == G_host.extensions());
 

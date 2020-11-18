@@ -317,7 +317,7 @@ public:
 
       //3. accumulate references
       for (auto& v : properties)
-        v.accumulate_reference(iav, iref, G4D, G4D_host, wgt, Xw, Ov, impsamp);
+        v.accumulate_reference(iav, iref, G4D, G4D_host, wgt, Xw, impsamp);
     }
     //4. accumulate block (normalize and accumulate sum over references)
     for (auto& v : properties)

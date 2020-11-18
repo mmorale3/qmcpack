@@ -10,6 +10,7 @@
 #include "AFQMC/Estimators/EnergyEstimator.h"
 #include "AFQMC/Estimators/BasicEstimator.h"
 #include "AFQMC/Estimators/MixedRDMEstimator.h"
+#include "AFQMC/Estimators/MixedEstimator.hpp"
 #include "AFQMC/Estimators/BackPropagatedEstimator.hpp"
 #include "AFQMC/Walkers/WalkerSet.hpp"
 #include "AFQMC/Hamiltonians/HamiltonianFactory.h"
@@ -180,6 +181,13 @@ public:
             estimators.emplace_back(static_cast<EstimPtr>(
                 std::make_shared<BackPropagatedEstimator>(TGgen.getTG(1), info, title, cur, walker_type, wset, *wfn,
                                                           prop0, impsamp)));
+            hdf_output = true;
+          }
+          else if (name == "mixed")
+          {
+            estimators.emplace_back(static_cast<EstimPtr>(
+                std::make_shared<MixedEstimator>(TGgen.getTG(1), info, title, cur, walker_type, 
+                                                 wset, *wfn)));
             hdf_output = true;
           }
           else if (name == "energy")

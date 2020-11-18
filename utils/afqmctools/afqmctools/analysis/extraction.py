@@ -129,7 +129,7 @@ def extract_observable(filename, estimator='back_propagated',
     elif estimator == 'mixed':
         base = 'Observables/Mixed/'
         ename = MAP[name]
-        base += ename['group']
+        base += ename['group'] + '/Average_0'
     else:
         print("Unknown estimator type: {} ".format(estimator))
         return None
