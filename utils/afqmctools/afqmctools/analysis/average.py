@@ -536,12 +536,12 @@ def analyse_ekt(filename, estimator='back_propagated', eqlb=1, skip=1, ix=None,
     gamma = P.real
     gamma_ = gamma.copy()
     # Diagonalise gamma and discard problematic singular values.
-    eip, eip_vec = solve_gen_eig(gamma, Fm)
+    eip, eip_vec = solve_gen_eig(gamma, Fm, cutoff=cutoff)
     eip_err = estimate_error_eig(gamma_, Perr, Fm, Fmerr, nsamp=nsamp, cutoff=cutoff)
     # Electron affinity.
     gamma = 2*I - P.T
     gamma = gamma.copy()
-    eea, eea_vec = solve_gen_eig(gamma, Fp)
+    eea, eea_vec = solve_gen_eig(gamma, Fp, cutoff=cutoff)
     eea_err = estimate_error_eig(gamma_, Perr, Fp, Fperr, nsamp=nsamp, cutoff=cutoff)
     if to_file is not None:
         with h5py.File(to_file, 'w') as fh5:
