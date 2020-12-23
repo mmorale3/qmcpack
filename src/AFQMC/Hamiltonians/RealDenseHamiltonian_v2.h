@@ -59,7 +59,7 @@ public:
     if (TG.TG_local().size() > 1 || not(batched == "yes" || batched == "true"))
     {
       app_log() << " alt_version = true only on GPU build with batched=true. " << std::endl;
-      APP_ABORT("");
+      //APP_ABORT("");
     }
   }
 

@@ -330,7 +330,8 @@ Hamiltonian HamiltonianFactory::fromHDF5(GlobalTaskGroup& gTG, xmlNodePtr cur)
     //      else
     return Hamiltonian(RealDenseHamiltonian_v2(AFinfo, cur, std::move(H1), TG, NuclearCoulombEnergy, FrozenCoreEnergy));
 #else
-    return Hamiltonian(RealDenseHamiltonian(AFinfo, cur, std::move(H1), TG, NuclearCoulombEnergy, FrozenCoreEnergy));
+    //return Hamiltonian(RealDenseHamiltonian(AFinfo, cur, std::move(H1), TG, NuclearCoulombEnergy, FrozenCoreEnergy));
+    return Hamiltonian(RealDenseHamiltonian_v2(AFinfo, cur, std::move(H1), TG, NuclearCoulombEnergy, FrozenCoreEnergy));
 #endif
   }
   else
